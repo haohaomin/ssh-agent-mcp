@@ -1,0 +1,79 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import net from 'node:net';
+import {setTimeout as delay} from 'node:timers/promises';
+import {Client} from '@modelcontextprotocol/sdk/client/index.js';
+import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
+import {localSshd} from './helpers/local-sshd.js';
+import {importOpenSsh} from '../build/utils/openssh-import.js';
+import {shellQuote} from '../build/utils/shell.js';
+
+for(const backend of ['ssh2','openssh']) test(`all 26 tools through real MCP stdio and sshd (${backend})`, {timeout:60000}, async t=>{
+  const fixture=await localSshd(t),root=fixture.root;
+  const config=backend==='ssh2'?fixture.config:{...importOpenSsh(fixture.clientConfig).configs.fixture,allowedLocalPaths:[root],allowedRemotePaths:[root],pty:false};
+  // Keep real remote job state within the disposable test directory.
+  config.commandTemplate=`export HOME=${shellQuote(root)}; <command>`;
+  const file=path.join(root,'servers.json');fs.writeFileSync(file,JSON.stringify({fixture:config}));
+  const transport=new StdioClientTransport({command:process.execPath,args:['build/index.js','--config-file',file],env:{...process.env,SSH_AGENT_STATE_DIR:path.join(root,'sessions')},stderr:'pipe'});
+  const client=new Client({name:'full-live-audit',version:'1'});await client.connect(transport);
+  const called=new Set(),forwards=[],jobs=[];let session=false;
+  const invoke=async(name,args={},error=false)=>{
+    called.add(name);const response=await client.callTool({name,arguments:args});const text=response.content.map(c=>c.text||'').join('\n');
+    assert.equal(!!response.isError,error,`${name}: ${text}`);return text;
+  };
+  const json=async(name,args)=>JSON.parse(await invoke(name,args));
+  const echo=net.createServer(socket=>{socket.on('error',()=>{});socket.pipe(socket);});await new Promise(r=>echo.listen(0,'127.0.0.1',r));
+  const roundtrip=port=>new Promise((resolve,reject)=>{const socket=net.connect(port,'127.0.0.1',()=>socket.write('mcp-forward'));socket.setTimeout(3000,()=>socket.destroy(new Error('timeout')));socket.on('error',reject);socket.once('data',data=>{socket.destroy();resolve(data.toString());});});
+  try{
+    const definitions=await client.listTools();assert.equal(definitions.tools.length,26);
+    assert.match(await invoke('ssh_server_list'),/fixture/);
+    assert.match(await invoke('ssh_exec',{command:'printf "%s|%s" "$TEST_ENV" "$PWD"',env:{TEST_ENV:'中文 value'},cwd:root}),new RegExp('中文 value\\|'+root));
+    assert.match(await invoke('ssh_exec',{command:'printf failed; exit 7'}),/\[exit code\] 7/);
+    await invoke('ssh_exec',{command:'sleep 3',timeoutMs:100},true);
+    assert.match(await invoke('ssh_exec',{command:'printf after-timeout'}),/after-timeout/);
+    const remote=path.join(root,'text.txt');
+    await invoke('ssh_file_write',{remotePath:remote,content:'alpha\n中文\n'});
+    await invoke('ssh_file_write',{remotePath:remote,content:'oops'},true);
+    await invoke('ssh_file_write',{remotePath:remote,content:'beta 42\n',mode:'append'});
+    assert.match(await invoke('ssh_file_read',{remotePath:remote}),/alpha/);
+    assert.match(await invoke('ssh_file_read',{remotePath:remote,format:'lines',startLine:2,lineCount:1}),/中文/);
+    await invoke('ssh_file_edit',{remotePath:remote,edits:[{oldText:'alpha',newText:'ALPHA'}]});
+    assert.match(await invoke('ssh_directory_list',{remotePath:root}),/text.txt/);
+    assert.equal((await json('ssh_file_grep',{remotePath:remote,pattern:'beta \\d+',regex:true,outputMode:'count'})).results[0].count,1);
+    assert.equal((await json('ssh_file_glob',{remotePath:root,pattern:'*.txt'})).results.length,1);
+    const local=path.join(root,'source'),uploaded=path.join(root,'uploaded'),downloaded=path.join(root,'downloaded');fs.mkdirSync(local);fs.mkdirSync(path.join(local,'nested'));fs.writeFileSync(path.join(local,'nested','binary'),Buffer.from([0,255,1,128,13,10]));
+    await invoke('ssh_upload',{localPath:local,remotePath:uploaded});
+    await invoke('ssh_download',{remotePath:uploaded,localPath:downloaded});
+    assert.deepEqual(fs.readFileSync(path.join(downloaded,'nested','binary')),fs.readFileSync(path.join(local,'nested','binary')));
+    const sync=path.join(root,'sync target');fs.mkdirSync(sync);fs.writeFileSync(path.join(sync,'obsolete'),'obsolete');
+    await invoke('ssh_sync',{localPath:local+'/',remotePath:sync+'/',direction:'upload',deleteExtra:true});assert.ok(fs.existsSync(path.join(sync,'obsolete')));
+    await invoke('ssh_sync',{localPath:local+'/',remotePath:sync+'/',direction:'upload',deleteExtra:true,dryRun:false});assert.ok(!fs.existsSync(path.join(sync,'obsolete')));
+    assert.deepEqual(fs.readFileSync(path.join(sync,'nested','binary')),fs.readFileSync(path.join(local,'nested','binary')));
+    await invoke('ssh_sync',{engine:'sftp',localPath:local,remotePath:sync,direction:'download',dryRun:false});
+    await invoke('ssh_file_read',{remotePath:'/etc/passwd'},true);
+    const started=await json('ssh_session_start',{sessionName:'audit',cwd:root,env:{SAVED:'保持状态'}});session=true;
+    const reused=await json('ssh_session_ensure',{sessionName:'audit'});assert.equal(reused.pid,started.pid);
+    assert.match(await invoke('ssh_session_list'),/audit/);
+    await invoke('ssh_session_write',{sessionName:'audit',input:'printf "RESULT=%s\\n" "$SAVED"\n'});
+    let output='';for(let i=0;i<200;i++){output=await invoke('ssh_session_read',{sessionName:'audit'});if(output.includes('RESULT=保持状态'))break;await delay(20);}assert.match(output,/RESULT=保持状态/);
+    await invoke('ssh_session_stop',{sessionName:'audit'});session=false;
+    assert.match(await invoke('ssh_session_log',{sessionName:'audit'}),/RESULT=保持状态/);
+    const startJob=async command=>{const text=await invoke('ssh_job_start',{command,cwd:root,env:{JOB_ENV:'job-value'}});const id=/jobId: (\S+)/.exec(text)[1];jobs.push(id);return id;};
+    const completed=await startJob('printf "%s" "$JOB_ENV"');let status='';for(let i=0;i<50;i++){status=await invoke('ssh_job_status',{jobId:completed});if(status.includes('[state] exited'))break;await delay(20);}assert.match(status,/job-value/);assert.match(status,/\[state\] exited/);assert.match(status,/\[exit code\] 0/);
+    assert.match(await invoke('ssh_job_list'),new RegExp(completed));
+    const running=await startJob('sleep 30');await invoke('ssh_job_kill',{jobId:running});assert.match(await invoke('ssh_job_status',{jobId:running}),/killed|exited/);
+    const forward=await json('ssh_forward_start',{remoteHost:'127.0.0.1',remotePort:echo.address().port});forwards.push(forward.forwardId);assert.equal(await roundtrip(forward.localPort),'mcp-forward');
+    const reverse=await json('ssh_forward_reverse',{localPort:echo.address().port});forwards.push(reverse.forwardId);assert.equal(await roundtrip(reverse.remotePort),'mcp-forward');
+    assert.equal((await json('ssh_forward_list')).length,2);
+    for(const forwardId of forwards.splice(0))await invoke('ssh_forward_stop',{forwardId});
+    assert.equal((await json('ssh_forward_list')).length,0);
+    assert.deepEqual([...called].sort(),definitions.tools.map(tool=>tool.name).sort());
+  }finally{
+    if(session)await invoke('ssh_session_stop',{sessionName:'audit'}).catch(()=>{});
+    for(const forwardId of forwards)await invoke('ssh_forward_stop',{forwardId}).catch(()=>{});
+    for(const jobId of jobs)await invoke('ssh_job_kill',{jobId}).catch(()=>{});
+    await client.close();await new Promise(r=>echo.close(r));
+  }
+});
