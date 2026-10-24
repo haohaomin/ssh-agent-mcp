@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
+import { applyPatch } from 'diff';
+import { PassThrough } from 'node:stream';
 import { RemoteFiles, applyEdits, globRegex } from '../build/services/remote-files.js';
 
 test('edits reject missing/ambiguous context and handle literal replacement text', () => {
@@ -33,6 +36,45 @@ test('failed atomic rename leaves original and removes temporary file', async t 
   sftp.ext_openssh_rename=(_a,_b,cb)=>cb(new Error('unsupported'));
   await assert.rejects(files.edit(p,[{oldText:'old',newText:'new'}]), /unsupported/);
   assert.equal(fs.readFileSync(p,'utf8'),'old'); assert.deepEqual(fs.readdirSync(root),['text']);
+});
+test('edit preview is read-only, yields an applicable diff and rejects a stale preview', async t => {
+  const {root,files}=setup(t),p=path.join(root,'text');const original='first\nsecond\nthird\n';fs.writeFileSync(p,original);
+  const edits=[{oldText:'second',newText:'第二行'}];
+  const preview=await files.edit(p,edits,undefined,{dryRun:true,backup:true});
+  assert.equal(preview.dryRun,true);assert.equal(preview.diffTruncated,false);assert.equal(applyPatch(original,preview.diff),'first\n第二行\nthird\n');
+  assert.equal(fs.readFileSync(p,'utf8'),original);assert.deepEqual(fs.readdirSync(root),['text']);
+  assert.equal(preview.beforeSha256,createHash('sha256').update(original).digest('hex'));
+  fs.appendFileSync(p,'other process\n');await assert.rejects(files.edit(p,edits,undefined,{expectedSha256:preview.beforeSha256,backup:true}),/hash differs/);
+  assert.deepEqual(fs.readdirSync(root),['text']);assert.match(fs.readFileSync(p,'utf8'),/other process/);
+});
+test('backup preserves exact UTF-8 BOM and CRLF bytes with private permissions', async t => {
+  const {root,files}=setup(t),p=path.join(root,'text'),original='\uFEFFfirst\r\nsecond\r\n';fs.writeFileSync(p,original);fs.chmodSync(p,0o640);
+  const edits=[{oldText:'second',newText:'second changed'}];
+  const preview=await files.edit(p,edits,undefined,{dryRun:true});
+  const result=await files.edit(p,edits,undefined,{backup:true,expectedSha256:preview.beforeSha256});
+  assert.equal(fs.readFileSync(result.backupPath,'utf8'),original);assert.equal(fs.statSync(result.backupPath).mode&0o777,0o600);
+  assert.equal(fs.readFileSync(p,'utf8'),'\uFEFFfirst\r\nsecond changed\r\n');assert.equal(fs.statSync(p).mode&0o777,0o640);
+  assert.equal(result.afterSha256,createHash('sha256').update(fs.readFileSync(p)).digest('hex'));
+});
+test('backup and original survive a failed rename, and no-op edits create no artifacts', async t => {
+  const {root,files,sftp}=setup(t),p=path.join(root,'text');fs.writeFileSync(p,'old');
+  const noop=await files.edit(p,[{oldText:'old',newText:'old'}],undefined,{backup:true});assert.equal(noop.changed,false);assert.deepEqual(fs.readdirSync(root),['text']);
+  sftp.ext_openssh_rename=(_a,_b,cb)=>cb(new Error('rename unavailable'));
+  await assert.rejects(files.edit(p,[{oldText:'old',newText:'new'}],undefined,{backup:true}),/backup may be present/);
+  const names=fs.readdirSync(root);assert.equal(names.length,2);const backup=names.find(n=>n.includes('.ssh-agent-backup-'));
+  assert.equal(fs.readFileSync(path.join(root,backup),'utf8'),'old');assert.equal(fs.readFileSync(p,'utf8'),'old');
+});
+test('edit preview bounds diff output and rejects oversized results before writing', async t => {
+  const {root,files}=setup(t),p=path.join(root,'text');fs.writeFileSync(p,'a'.repeat(70000));
+  const preview=await files.edit(p,[{oldText:'a'.repeat(70000),newText:'b'.repeat(70000)}],undefined,{dryRun:true});assert.equal(preview.diffTruncated,true);assert.ok(preview.diff.length<=65536);
+  await assert.rejects(files.edit(p,[{oldText:'a'.repeat(70000),newText:'b'.repeat(4*1024*1024+1)}],undefined,{dryRun:true}),/4 MiB/);
+  assert.deepEqual(fs.readdirSync(root),['text']);
+});
+test('backup write failure aborts replacement and cleans the edit temporary file', async t => {
+  const {root,files,sftp}=setup(t),p=path.join(root,'text');fs.writeFileSync(p,'old');
+  sftp.createWriteStream=(file,options)=>{if(!file.includes('.ssh-agent-backup-'))return fs.createWriteStream(file,options);const stream=new PassThrough();queueMicrotask(()=>stream.destroy(new Error('backup quota exceeded')));return stream;};
+  await assert.rejects(files.edit(p,[{oldText:'old',newText:'new'}],undefined,{backup:true}),/backup quota exceeded/);
+  assert.equal(fs.readFileSync(p,'utf8'),'old');assert.deepEqual(fs.readdirSync(root),['text']);
 });
 test('search supports nested globs, bounded literal results and skips symlinks', async t => {
   const {root,files}=setup(t); fs.mkdirSync(path.join(root,'src')); fs.writeFileSync(path.join(root,'src','a.ts'),'hello\nhello again\n'); fs.symlinkSync('/etc',path.join(root,'link'));

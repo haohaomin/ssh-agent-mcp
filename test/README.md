@@ -1,12 +1,12 @@
 # 测试文档
 
-本项目使用 Node.js 内置的测试框架进行单元测试和集成测试。当前共 296 项，最近完整结果见 [测试报告](../docs/TEST_REPORT.md)。
+本项目使用 Node.js 内置的测试框架进行单元测试和集成测试。当前共 301 项，最近完整结果见 [测试报告](../docs/TEST_REPORT.md)。
 
 实际 SSH 集成测试需要本机 `ssh`、`ssh-keygen`、`rsync` 和 sshd（默认 `/usr/sbin/sshd`，可用 `SSH_AGENT_TEST_SSHD` 指定）。测试创建临时密钥与仅监听 loopback 的临时服务器，不连接个人配置中的服务器。真实 sshd 测试要求账户可以使用公钥登录该本机测试服务。
 
 新增的主要集成测试：
 
-- `mcp-live-tools.test.js`：分别通过 ssh2/OpenSSH，从真实 MCP stdio 客户端调用全部 29 个工具；含超时、中文、二进制目录传输、rsync/SFTP、持久终端、任务、转发、连接诊断、配置热加载和日志清理。后台任务 HOME 被限定到临时目录。
+- `mcp-live-tools.test.js`：分别通过 ssh2/OpenSSH，从真实 MCP stdio 客户端调用全部 30 个工具；含超时、中文、二进制目录传输、rsync/SFTP、持久终端、任务、转发、连接诊断、配置热加载和日志清理。后台任务 HOME 被限定到临时目录。
 - `full-features-live.test.js`：证书认证、ProxyCommand/Match、块级差分、父进程退出后的终端恢复。
 - `auth-live-audit.test.js`：两种后端的加密私钥认证与错误主机公钥拒绝。
 - `audit-regressions.test.js`：通道进程回收、终端重开与反向转发断线清理。

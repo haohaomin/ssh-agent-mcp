@@ -10,7 +10,7 @@ import {localSshd} from './helpers/local-sshd.js';
 import {importOpenSsh} from '../build/utils/openssh-import.js';
 import {shellQuote} from '../build/utils/shell.js';
 
-for(const backend of ['ssh2','openssh']) test(`all 29 tools through real MCP stdio and sshd (${backend})`, {timeout:60000}, async t=>{
+for(const backend of ['ssh2','openssh']) test(`all 30 tools through real MCP stdio and sshd (${backend})`, {timeout:60000}, async t=>{
   const fixture=await localSshd(t),root=fixture.root;
   const config=backend==='ssh2'?fixture.config:{...importOpenSsh(fixture.clientConfig).configs.fixture,allowedLocalPaths:[root],allowedRemotePaths:[root],pty:false};
   // Keep real remote job state within the disposable test directory.
@@ -27,7 +27,7 @@ for(const backend of ['ssh2','openssh']) test(`all 29 tools through real MCP std
   const echo=net.createServer(socket=>{socket.on('error',()=>{});socket.pipe(socket);});await new Promise(r=>echo.listen(0,'127.0.0.1',r));
   const roundtrip=port=>new Promise((resolve,reject)=>{const socket=net.connect(port,'127.0.0.1',()=>socket.write('mcp-forward'));socket.setTimeout(3000,()=>socket.destroy(new Error('timeout')));socket.on('error',reject);socket.once('data',data=>{socket.destroy();resolve(data.toString());});});
   try{
-    const definitions=await client.listTools();assert.equal(definitions.tools.length,29);
+    const definitions=await client.listTools();assert.equal(definitions.tools.length,30);
     assert.match(await invoke('ssh_server_list'),/fixture/);
     assert.match(await invoke('ssh_exec',{command:'printf "%s|%s" "$TEST_ENV" "$PWD"',env:{TEST_ENV:'中文 value'},cwd:root}),new RegExp('中文 value\\|'+root));
     assert.match(await invoke('ssh_exec',{command:'printf failed; exit 7'}),/\[exit code\] 7/);
@@ -39,7 +39,9 @@ for(const backend of ['ssh2','openssh']) test(`all 29 tools through real MCP std
     await invoke('ssh_file_write',{remotePath:remote,content:'beta 42\n',mode:'append'});
     assert.match(await invoke('ssh_file_read',{remotePath:remote}),/alpha/);
     assert.match(await invoke('ssh_file_read',{remotePath:remote,format:'lines',startLine:2,lineCount:1}),/中文/);
-    await invoke('ssh_file_edit',{remotePath:remote,edits:[{oldText:'alpha',newText:'ALPHA'}]});
+    const edits=[{oldText:'alpha',newText:'ALPHA'}];
+    const preview=await json('ssh_file_edit',{remotePath:remote,edits,dryRun:true});assert.match(preview.diff,/-alpha/);assert.match(fs.readFileSync(remote,'utf8'),/alpha/);
+    const edited=await json('ssh_file_edit',{remotePath:remote,edits,backup:true,expectedSha256:preview.beforeSha256});assert.match(fs.readFileSync(edited.backupPath,'utf8'),/alpha/);
     assert.match(await invoke('ssh_directory_list',{remotePath:root}),/text.txt/);
     assert.equal((await json('ssh_file_grep',{remotePath:remote,pattern:'beta \\d+',regex:true,outputMode:'count'})).results[0].count,1);
     assert.equal((await json('ssh_file_glob',{remotePath:root,pattern:'*.txt'})).results.length,1);
@@ -53,12 +55,19 @@ for(const backend of ['ssh2','openssh']) test(`all 29 tools through real MCP std
     assert.deepEqual(fs.readFileSync(path.join(sync,'nested','binary')),fs.readFileSync(path.join(local,'nested','binary')));
     await invoke('ssh_sync',{engine:'sftp',localPath:local,remotePath:sync,direction:'download',dryRun:false});
     await invoke('ssh_file_read',{remotePath:'/etc/passwd'},true);
-    const started=await json('ssh_session_start',{sessionName:'audit',cwd:root,env:{SAVED:'保持状态'}});session=true;
+    const started=await json('ssh_session_start',{sessionName:'audit',cols:90,rows:25,cwd:root,env:{SAVED:'保持状态'}});session=true;
     const reused=await json('ssh_session_ensure',{sessionName:'audit'});assert.equal(reused.pid,started.pid);
     assert.match(await invoke('ssh_session_list'),/audit/);
     await invoke('ssh_session_write',{sessionName:'audit',input:'printf "RESULT=%s\\n" "$SAVED"\n'});
     let output='';for(let i=0;i<200;i++){output=await invoke('ssh_session_read',{sessionName:'audit'});if(output.includes('RESULT=保持状态'))break;await delay(20);}assert.match(output,/RESULT=保持状态/);
+    await invoke('ssh_session_write',{sessionName:'audit',input:"printf 'INITIAL='; stty size\n"});
+    for(let i=0;i<200;i++){output=await invoke('ssh_session_read',{sessionName:'audit'});if(output.includes('INITIAL=25 90'))break;await delay(20);}assert.match(output,/INITIAL=25 90/);
+    const resized=await json('ssh_session_resize',{sessionName:'audit',cols:132,rows:42});assert.equal(resized.cols,132);assert.equal(resized.rows,42);
+    await invoke('ssh_session_write',{sessionName:'audit',input:"printf 'SIZE='; stty size\n"});
+    for(let i=0;i<200;i++){output=await invoke('ssh_session_read',{sessionName:'audit'});if(output.includes('SIZE=42 132'))break;await delay(20);}assert.match(output,/SIZE=42 132/);
+    await invoke('ssh_session_resize',{sessionName:'audit',cols:0,rows:42},true);
     await invoke('ssh_session_stop',{sessionName:'audit'});session=false;
+    await invoke('ssh_session_resize',{sessionName:'audit',cols:90,rows:25},true);
     assert.match(await invoke('ssh_session_log',{sessionName:'audit'}),/RESULT=保持状态/);
     const startJob=async command=>{const text=await invoke('ssh_job_start',{command,cwd:root,env:{JOB_ENV:'job-value'}});const id=/jobId: (\S+)/.exec(text)[1];jobs.push(id);return id;};
     const completed=await startJob('printf "%s" "$JOB_ENV"');let status='';for(let i=0;i<50;i++){status=await invoke('ssh_job_status',{jobId:completed});if(status.includes('[state] exited'))break;await delay(20);}assert.match(status,/job-value/);assert.match(status,/\[state\] exited/);assert.match(status,/\[exit code\] 0/);

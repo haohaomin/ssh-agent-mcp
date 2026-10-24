@@ -35,6 +35,7 @@ process.once('message',async({sessionName,connectionName,config,options,paths}:a
         if(method==='info')result=manager.interactive.list().find(s=>s.sessionName===sessionName);
         else if(method==='read')result=manager.interactive.read(sessionName,args.offset,args.maxChars);
         else if(method==='write')result=manager.interactive.write(sessionName,args.input);
+        else if(method==='resize')result=manager.interactive.resize(sessionName,args.cols,args.rows);
         else if(method==='stop'){result=manager.interactive.stop(sessionName);stop=true;}
         else throw new Error('Unknown session operation');
         // A stop reply acknowledges persisted metadata and finished cleanup.

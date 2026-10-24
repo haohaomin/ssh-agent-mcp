@@ -8,6 +8,7 @@
     "ssh-agent-mcp": "build/index.js"
   },
   "scripts": {
+    "postinstall": "node scripts/prepare-pty.js",
     "test": "node scripts/run-tests.js",
     "test:watch": "node --test --watch test/**/*.test.js",
     "build": "node scripts/build.js",
@@ -27,6 +28,8 @@
   "license": "ISC AND MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.0",
+    "diff": "^9.0.0",
+    "node-pty": "1.1.0",
     "picomatch": "^4.0.7",
     "socks": "^2.8.7",
     "ssh2": "1.17.0",
@@ -40,6 +43,7 @@
     "typescript": "^5.8.2"
   },
   "files": [
+    "scripts/prepare-pty.js",
     "build/**/*",
     "LICENSES/**/*",
     "THIRD_PARTY.md",

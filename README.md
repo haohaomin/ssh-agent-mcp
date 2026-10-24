@@ -2,7 +2,7 @@
 
 **让 AI 复用你的 SSH 配置，完成远程开发与运维。**
 
-一个 TypeScript MCP 服务，提供 **29 个工具**：命令执行、文件传输与编辑、搜索、目录同步、持久终端、后台任务、双向端口转发、连接诊断、配置热加载和日志清理。常规连接使用 ssh2；OpenSSH 特有配置自动交给本机 `ssh`，使用同一套工具和参数。
+一个 TypeScript MCP 服务，提供 **30 个工具**：命令执行、文件传输与编辑、搜索、目录同步、持久终端、后台任务、双向端口转发、连接诊断、配置热加载和日志清理。常规连接使用 ssh2；OpenSSH 特有配置自动交给本机 `ssh`，使用同一套工具和参数。
 
 [文档网站](https://haohaomin.github.io/ssh-agent-mcp/) · [工具参考](docs/TOOLS.md) · [配置说明](docs/CONFIGURATION.md) · [使用示例](docs/USAGE.md) · [测试报告](docs/TEST_REPORT.md)
 
@@ -12,6 +12,7 @@
 |---|---|
 | 复用本机连接 | 导入 `~/.ssh/config`，支持别名、Include、跳板机；兼容证书、ProxyCommand 和 Match |
 | 操作远程文件 | 上传/下载文件与目录，按行/字节读取，创建/覆盖/追加，精确编辑与目录浏览 |
+| 审核文件修改 | 编辑差异预览、内容哈希校验、可选私有备份 |
 | 定位代码和日志 | 正则、上下文、计数、文件列表、glob 和排除规则 |
 | 同步项目 | rsync 块级差分、压缩、预览和删除；可选 SFTP 同步 |
 | 保留工作现场 | 终端跨 MCP 重启复用、完整落盘日志、可选 tmux 观察窗口 |
@@ -39,6 +40,8 @@ brew install tmux rsync
 ```
 
 持久终端和 rsync 桥接使用 Unix socket。Windows 尚未实测。
+
+原生 OpenSSH 的交互终端使用 `node-pty`。`npm ci` 会安装本机模块并修复 macOS 辅助程序权限；没有适配的预编译模块时需要 Python 3 和 C++ 编译工具。请保留安装脚本；若曾使用 `--ignore-scripts`，先运行 `npm rebuild node-pty` 和 `npm run postinstall`。
 
 ### 2. 安装项目
 
@@ -104,7 +107,7 @@ node build/index.js --config-file servers.json
 
 **后端按配置选择，与调用哪一种工具无关。** `HostName`、`User`、`Port`、单个密钥、`ProxyJump` 等可映射到 ssh2；证书、`Match`、`ProxyCommand` 和其他未映射选项转交 OpenSSH。保守切换可能由普通选项触发，不一定是复杂配置。完整规则见 [配置说明](docs/CONFIGURATION.md)。
 
-## 统一的 29 个工具
+## 统一的 30 个工具
 
 | 类别 | 工具 |
 |---|---|
@@ -113,7 +116,7 @@ node build/index.js --config-file servers.json
 | 文件操作 | `ssh_file_read`、`ssh_file_write`、`ssh_file_edit`、`ssh_directory_list` |
 | 搜索 | `ssh_file_grep`、`ssh_file_glob` |
 | 同步 | `ssh_sync` |
-| 持久终端 | `ssh_session_start`、`ssh_session_ensure`、`ssh_session_list`、`ssh_session_read`、`ssh_session_write`、`ssh_session_log`、`ssh_session_stop` |
+| 持久终端 | `ssh_session_start`、`ssh_session_ensure`、`ssh_session_list`、`ssh_session_read`、`ssh_session_write`、`ssh_session_log`、`ssh_session_resize`、`ssh_session_stop` |
 | 日志维护 | `ssh_session_log_cleanup` |
 | 后台任务 | `ssh_job_start`、`ssh_job_status`、`ssh_job_kill`、`ssh_job_list` |
 | 端口转发 | `ssh_forward_start`、`ssh_forward_reverse`、`ssh_forward_list`、`ssh_forward_stop` |
@@ -156,7 +159,7 @@ npm run docs:serve       # 在本机预览网站
 npm pack --dry-run      # 检查分发包
 ```
 
-截至 **2026-10-24**，完整功能回归 **296 项通过**。两种后端分别经真实 MCP 客户端实测全部 29 个工具；另有证书、加密密钥、主机公钥拒绝、终端恢复与 tmux 窗口测试。这是测试快照，完整范围见 [测试报告](docs/TEST_REPORT.md)。
+截至 **2026-10-25**，完整功能回归 **301 项通过**。两种后端分别经真实 MCP 客户端实测全部 30 个工具；另有证书、加密密钥、主机公钥拒绝、终端恢复与 tmux 窗口测试。这是测试快照，完整范围见 [测试报告](docs/TEST_REPORT.md)。
 
 真实网络测试需要本机 `sshd`、`ssh-keygen`、`ssh`、`rsync` 和 `tmux`，使用临时密钥与 loopback SSH 服务。测试方法见 [测试文档](test/README.md)。文档网站的 GitHub Pages 构建与发布见 [网站维护](docs/PAGES.md)。
 

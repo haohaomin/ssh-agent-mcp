@@ -6,7 +6,8 @@ import { createReadStream, createWriteStream } from 'node:fs';
 import type { SFTPWrapper, Stats } from 'ssh2';
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
+import { createTwoFilesPatch } from 'diff';
 import { SSHConnectionManager } from './ssh-connection-manager.js';
 
 const MAX_TEXT = 4 * 1024 * 1024;
@@ -23,7 +24,7 @@ async function text(sftp: SFTPWrapper, p: string, maxBytes = MAX_TEXT): Promise<
   }
   const buffer = Buffer.concat(chunks);
   if (buffer.includes(0)) throw new Error('Binary file; use download');
-  return new TextDecoder('utf-8', { fatal: true }).decode(buffer);
+  return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(buffer);
 }
 function write(sftp: SFTPWrapper, p: string, content: string, flags: 'wx' | 'w', mode?: number): Promise<void> {
   if (Buffer.byteLength(content) > MAX_TEXT) throw new Error('Text exceeds 4 MiB');
@@ -42,6 +43,14 @@ export function applyEdits(original: string, edits: { oldText: string; newText: 
     content = content.slice(0, at) + edit.newText + content.slice(at + edit.oldText.length);
   }
   return content;
+}
+export type EditOptions = { dryRun?: boolean; backup?: boolean; expectedSha256?: string };
+function editPreview(original: string, changed: string) {
+  const hash = (value: string) => createHash('sha256').update(value).digest('hex');
+  // Bound tokenization and diff work separately from the file size budget.
+  const lines = (original.match(/\n/g)?.length || 0) + (changed.match(/\n/g)?.length || 0);
+  const patch = lines > 50000 ? undefined : createTwoFilesPatch('before', 'after', original, changed, undefined, undefined, {context:3,timeout:100,maxEditLength:2000});
+  return { beforeSha256:hash(original), afterSha256:hash(changed), diff:patch?.slice(0,65536) ?? '', diffTruncated:patch === undefined || patch.length > 65536 };
 }
 export class RemoteFiles {
   private locks = new Map<string, Promise<unknown>>();
@@ -76,21 +85,35 @@ export class RemoteFiles {
       return { created: p, bytes: Buffer.byteLength(content) };
     });
   }
-  async edit(p: string, edits: { oldText: string; newText: string }[], name?: string) {
+  async edit(p: string, edits: { oldText: string; newText: string }[], name?: string, options: EditOptions = {}) {
     const key = `${name || ''}:${p}`;
     const before = this.locks.get(key) || Promise.resolve();
     const work = before.catch(() => {}).then(() => this.manager.withSftp(name, async sftp => {
       const resolved = await this.checked(sftp, p, name);
       const original = await text(sftp, resolved);
+      if (options.expectedSha256 && createHash('sha256').update(original).digest('hex') !== options.expectedSha256.toLowerCase()) throw new Error('File hash differs from preview; read and preview the file again');
       const changed = applyEdits(original, edits);
+      if(Buffer.byteLength(changed)>MAX_TEXT)throw new Error('Text exceeds 4 MiB');
+      const preview = {remotePath:p,dryRun:options.dryRun ?? false,changed:changed!==original,replacements:edits.length,bytes:Buffer.byteLength(changed),...editPreview(original,changed)};
+      if(options.dryRun || changed===original)return preview;
       const info = await stat(sftp, resolved);
       const temp = `${resolved}.ssh-agent-${randomUUID()}`;
+      let backupPath: string | undefined;
       try {
         await write(sftp, temp, changed, 'wx', info.mode & 0o777);
         if (await text(sftp, resolved) !== original) throw new Error('File changed during edit; retry after reading it');
+        if(options.backup){
+          backupPath = await this.checked(sftp, `${resolved}.ssh-agent-backup-${randomUUID()}`, name, true);
+          // Backup creation is exclusive and private; failure leaves the original untouched.
+          await write(sftp, backupPath, original, 'wx', 0o600);
+          if (await text(sftp, resolved) !== original) throw new Error('File changed while backing up; preview again');
+        }
         // Require atomic replacement; do not delete the original as a fallback.
         await new Promise<void>((resolve, reject) => sftp.ext_openssh_rename(temp, resolved, e => e ? reject(e) : resolve()));
-        return { edited: p, replacements: edits.length, bytes: Buffer.byteLength(changed) };
+        return { ...preview, edited:p, backupPath };
+      } catch(error) {
+        if(backupPath)throw new Error(`${(error as Error).message}; backup may be present at ${backupPath}`);
+        throw error;
       } finally {
         await new Promise<void>(resolve => sftp.unlink(temp, () => resolve()));
       }

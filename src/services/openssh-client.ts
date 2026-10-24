@@ -1,7 +1,9 @@
 import { fileURLToPath } from 'node:url';
 import { shellQuote } from '../utils/shell.js';
 import { EventEmitter } from 'node:events';
-import { Duplex } from 'node:stream';
+import { Duplex, PassThrough } from 'node:stream';
+import { StringDecoder } from 'node:string_decoder';
+import type { IPty } from 'node-pty';
 import { spawn, execFile, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -31,12 +33,33 @@ class ProcessChannel extends Duplex {
   close(){this.destroy();}
   signal(signal:string){this.child.kill(signal as NodeJS.Signals);}
 }
+class PtyChannel extends Duplex {
+  stderr = new PassThrough();
+  private decoder = new StringDecoder('utf8');
+  private exited = false;
+  constructor(private terminal: IPty) {
+    super({emitClose:false});
+    terminal.onData(data => { if(!this.push(data))terminal.pause(); });
+    terminal.onExit(({exitCode,signal}) => {
+      this.exited=true;this.stderr.end();this.push(null);
+      this.emit('exit',exitCode,signal);this.emit('close',exitCode,signal);
+    });
+  }
+  _read(){this.terminal.resume();}
+  _write(chunk:Buffer,_encoding:BufferEncoding,callback:(error?:Error|null)=>void){
+    try{this.terminal.write(this.decoder.write(chunk));callback();}catch(error){callback(error as Error);}
+  }
+  _destroy(error:Error|null,callback:(error?:Error|null)=>void){if(!this.exited){try{this.terminal.kill();}catch{}}callback(error);}
+  close(){this.destroy();}
+  setWindow(rows:number,cols:number){this.terminal.resize(cols,rows);}
+}
 /** ssh2-shaped adapter: native SSH owns authentication/config, SFTPStream owns file protocol. */
 export class OpenSshClient extends EventEmitter {
   private dir=fs.mkdtempSync(path.join(os.tmpdir(),'ssh-agent-native-'));
   private socket=path.join(this.dir,'control');
   private master?: ChildProcessWithoutNullStreams;
   private children=new Set<ChildProcessWithoutNullStreams>();
+  private terminals=new Set<IPty>();
   private forwards=new Map<number,{server:net.Server;channels:Set<Duplex>}>();
   private ended=false;
   constructor(private config:SSHConfig){super();fs.chmodSync(this.dir,0o700);}
@@ -46,10 +69,13 @@ export class OpenSshClient extends EventEmitter {
     if(this.config.nativeConfigFile)args.push('-F',this.config.nativeConfigFile);
     return [...args,...(this.config.nativeOptions||[]),...extra,'--',this.target];
   }
-  private run(args:string[]){
+  private environment(){
     const askpass = path.join(this.dir, 'askpass');
     if(this.config.password||this.config.passphrase) fs.writeFileSync(askpass, '#!/bin/sh\nexec '+shellQuote(process.execPath)+' '+shellQuote(fileURLToPath(new URL('../cli/native-askpass.js',import.meta.url)))+' "$@"\n',{mode:0o700});
-    const child=spawn(process.env.SSH_MCP_SSH_BIN||'ssh',args,{stdio:'pipe',env:{...process.env,...((this.config.password||this.config.passphrase)?{SSH_ASKPASS:askpass,SSH_ASKPASS_REQUIRE:'force',DISPLAY:'ssh-agent',SSH_AGENT_NATIVE_PASSWORD:this.config.password,SSH_AGENT_NATIVE_PASSPHRASE:this.config.passphrase}:{}),...(this.config.agent?{SSH_AUTH_SOCK:this.config.agent}:{})}});this.children.add(child);child.once('close',()=>this.children.delete(child));return child;}
+    return {...process.env,...((this.config.password||this.config.passphrase)?{SSH_ASKPASS:askpass,SSH_ASKPASS_REQUIRE:'force',DISPLAY:'ssh-agent',SSH_AGENT_NATIVE_PASSWORD:this.config.password,SSH_AGENT_NATIVE_PASSPHRASE:this.config.passphrase}:{}),...(this.config.agent?{SSH_AUTH_SOCK:this.config.agent}:{})};
+  }
+  private run(args:string[]){
+    const child=spawn(process.env.SSH_MCP_SSH_BIN||'ssh',args,{stdio:'pipe',env:this.environment()});this.children.add(child);child.once('close',()=>this.children.delete(child));return child;}
   connect(){
     this.master=this.run(this.args(['-M','-N','-o','ControlMaster=yes','-o','ControlPersist=no']));
     let stderr='';this.master.stderr.on('data',b=>{stderr=(stderr+b.toString()).slice(-8192);});
@@ -68,7 +94,14 @@ export class OpenSshClient extends EventEmitter {
     const child=this.run([...this.args([options?.pty?'-tt':'-T','-o','RemoteCommand=none']),command]);
     const channel=new ProcessChannel(child);callback(undefined,channel);
   }
-  shell(_options:any,callback:any){const channel=new ProcessChannel(this.run(this.args(['-tt'])));callback(undefined,channel);}
+  shell(options:any,callback:any){
+    try{
+      const pty=require('node-pty') as typeof import('node-pty');
+      const terminal=pty.spawn(process.env.SSH_MCP_SSH_BIN||'ssh',this.args(['-tt']),{name:options?.term||'xterm-256color',cols:options?.cols||120,rows:options?.rows||30,env:this.environment(),encoding:null});
+      this.terminals.add(terminal);terminal.onExit(()=>this.terminals.delete(terminal));
+      callback(undefined,new PtyChannel(terminal));
+    }catch(error){callback(error);}
+  }
   sftp(callback:any){
     // Isolated adapter to ssh2's pinned SFTP protocol implementation; channel transport is a native ssh subprocess.
     const {SFTP}=require('ssh2/lib/protocol/SFTP.js');
@@ -104,6 +137,6 @@ export class OpenSshClient extends EventEmitter {
     const localPort=(entry.server.address() as net.AddressInfo)?.port;
     execFile(process.env.SSH_MCP_SSH_BIN||'ssh',this.args(['-O','cancel','-R',`${bindHost}:${port}:127.0.0.1:${localPort}`]),{timeout:10000},error=>{entry.server.close();for(const c of entry.channels)c.destroy();this.forwards.delete(port);callback(error);});
   }
-  end(){if(this.ended)return;this.ended=true;for(const e of this.forwards.values()){e.server.close();for(const c of e.channels)c.destroy();}for(const child of this.children)child.kill();fs.rmSync(this.dir,{recursive:true,force:true});}
+  end(){if(this.ended)return;this.ended=true;for(const e of this.forwards.values()){e.server.close();for(const c of e.channels)c.destroy();}for(const child of this.children)child.kill();for(const terminal of this.terminals){try{terminal.kill();}catch{}}fs.rmSync(this.dir,{recursive:true,force:true});}
   destroy(){this.end();}
 }

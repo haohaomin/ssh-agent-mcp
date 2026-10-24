@@ -7,7 +7,8 @@ import { randomUUID } from 'node:crypto';
 import type { SSHConfig } from '../models/types.js';
 
 type Connections = { connect(name?: string): Promise<void>; getClient(name?: string): Client; getConfig(name?: string): SSHConfig };
-type Session = { id: string; connectionName?: string; channel: ClientChannel; output: string; base: number; total: number; closed: boolean; error?: string; decoder: StringDecoder; stderrDecoder: StringDecoder };
+type Session = { id: string; connectionName?: string; channel: ClientChannel; cols:number; rows:number; output: string; base: number; total: number; closed: boolean; error?: string; decoder: StringDecoder; stderrDecoder: StringDecoder };
+function dimensions(cols:number,rows:number){if(!Number.isInteger(cols)||!Number.isInteger(rows)||cols<1||cols>1000||rows<1||rows>1000)throw new Error('Terminal cols and rows must be integers between 1 and 1000');}
 export class InteractiveService {
   private generation = 0;
   private sessions = new Map<string, Session>();
@@ -15,7 +16,8 @@ export class InteractiveService {
   private forwards = new Map<string, { client: Client; onClose: () => void; server: net.Server; sockets: Set<net.Socket>; connectionName?: string; host: string; port: number; remoteHost: string; remotePort: number }>();
   private reverseForwards = new Map<string, { onClose: () => void; client: Client; port: number; bindHost: string; localHost: string; localPort: number; connectionName?: string; sockets: Set<net.Socket>; handler: (...args: any[]) => void }>();
   constructor(private manager: Connections) {}
-  async start(id: string, connectionName?: string, ensure = false, options: { cwd?: string; env?: Record<string, string>; shell?: string; logPath?: string } = {}): Promise<unknown> {
+  async start(id: string, connectionName?: string, ensure = false, options: { cwd?: string; env?: Record<string, string>; shell?: string; logPath?: string;cols?:number;rows?:number } = {}): Promise<unknown> {
+    const cols=options.cols??120,rows=options.rows??30;dimensions(cols,rows);
     const existing = this.sessions.get(id);
     if (existing && !existing.closed) {
       if (!ensure || existing.connectionName !== connectionName) throw new Error('Session name already in use');
@@ -37,14 +39,14 @@ export class InteractiveService {
       const channel = await new Promise<ClientChannel>((resolve, reject) => {
         const timer = setTimeout(() => { done = true; reject(new Error('Shell open timed out')); }, 10000);
         let done = false;
-        client.shell({ term: 'xterm-256color', cols: 120, rows: 30 }, (err, stream) => {
+        client.shell({ term: 'xterm-256color', cols, rows }, (err, stream) => {
           clearTimeout(timer);
           if (done) { stream?.close(); return; }
           done = true; err ? reject(err) : resolve(stream);
         });
       });
       if (generation !== this.generation) { channel.close(); throw new Error("Server is closing"); }
-      const session: Session = { id, connectionName, channel, output: '', base: 0, total: 0, closed: false, decoder: new StringDecoder('utf8'), stderrDecoder: new StringDecoder('utf8') };
+      const session: Session = { id, connectionName, channel, cols, rows, output: '', base: 0, total: 0, closed: false, decoder: new StringDecoder('utf8'), stderrDecoder: new StringDecoder('utf8') };
       const logFd = options.logPath ? fs.openSync(options.logPath, 'a', 0o600) : undefined;
       const append = (text: string) => {
         if (logFd !== undefined) fs.writeSync(logFd, text);
@@ -68,7 +70,11 @@ export class InteractiveService {
     this.pending.set(id, operation);
     try { return await operation; } finally { this.pending.delete(id); }
   }
-  private info(s: Session) { return { sessionName: s.id, connectionName: s.connectionName, closed: s.closed, baseOffsetChars: s.base, nextOffsetChars: s.total, error: s.error }; }
+  private info(s: Session) { return { sessionName: s.id, connectionName: s.connectionName, cols:s.cols,rows:s.rows,closed: s.closed, baseOffsetChars: s.base, nextOffsetChars: s.total, error: s.error }; }
+  resize(id:string,cols:number,rows:number){
+    dimensions(cols,rows);const s=this.sessions.get(id);if(!s||s.closed)throw new Error('Session is not running');
+    s.channel.setWindow(rows,cols,0,0);s.cols=cols;s.rows=rows;return this.info(s);
+  }
   list() { return [...this.sessions.values()].map(s => this.info(s)); }
   read(id: string, offset = 0, maxChars = 65536) {
     const s = this.sessions.get(id); if (!s) throw new Error('Session not found');

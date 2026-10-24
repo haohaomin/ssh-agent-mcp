@@ -1,6 +1,6 @@
 # MCP 工具参考
 
-由 `npm run docs:tools` 从实际工具定义生成。共 29 个工具。参数统一使用 camelCase，时间单位为毫秒，偏移明确区分字节和字符。
+由 `npm run docs:tools` 从实际工具定义生成。共 30 个工具。参数统一使用 camelCase，时间单位为毫秒，偏移明确区分字节和字符。
 
 ## ssh_config_reload
 
@@ -128,7 +128,7 @@ Execute command on connected server and get output result. A non-zero exit code 
 
 ## ssh_file_edit
 
-Replace unique exact text matches. Atomic replacement requires OpenSSH SFTP rename extension. Rejects ambiguous matches.
+Preview or apply unique exact text replacements. dryRun returns a bounded unified diff and beforeSha256; expectedSha256 rejects stale previews. backup creates an exclusive private sibling copy before atomic replacement. Defaults preserve direct editing.
 
 ```json
 {
@@ -160,6 +160,18 @@ Replace unique exact text matches. Atomic replacement requires OpenSSH SFTP rena
           "newText"
         ]
       }
+    },
+    "dryRun": {
+      "default": false,
+      "type": "boolean"
+    },
+    "backup": {
+      "default": false,
+      "type": "boolean"
+    },
+    "expectedSha256": {
+      "type": "string",
+      "pattern": "^[a-fA-F0-9]{64}$"
     },
     "connectionName": {
       "description": "Configured connection name; defaults to the first configured connection",
@@ -727,6 +739,18 @@ Open a persistent interactive SSH terminal, retained by a detached worker across
       "default": false,
       "type": "boolean"
     },
+    "cols": {
+      "default": 120,
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000
+    },
+    "rows": {
+      "default": 30,
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000
+    },
     "cwd": {
       "type": "string",
       "minLength": 1
@@ -854,6 +878,39 @@ Read terminal output since a character offset. Reports truncation when the bound
 }
 ```
 
+## ssh_session_resize
+
+Resize a running remote terminal on either backend. The worker must have been started with a version supporting resize. Dimensions on ensure only apply when creating a new terminal.
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "sessionName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100
+    },
+    "cols": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000
+    },
+    "rows": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000
+    }
+  },
+  "required": [
+    "sessionName",
+    "cols",
+    "rows"
+  ]
+}
+```
+
 ## ssh_session_start
 
 Open a persistent interactive SSH terminal, retained by a detached worker across MCP restarts; stop explicitly to end it. Requires unrestricted command access.
@@ -888,6 +945,18 @@ Open a persistent interactive SSH terminal, retained by a detached worker across
     "autoClose": {
       "default": false,
       "type": "boolean"
+    },
+    "cols": {
+      "default": 120,
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000
+    },
+    "rows": {
+      "default": 30,
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000
     },
     "cwd": {
       "type": "string",

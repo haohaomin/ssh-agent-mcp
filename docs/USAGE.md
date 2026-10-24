@@ -36,6 +36,18 @@
 
 旧文本必须唯一匹配。写入临时文件后使用 SFTP POSIX rename 原子替换；服务器不支持扩展时保留原文件并返回错误。保留普通权限位，不保留所有者、ACL 和扩展属性；并发内容变化会拒绝编辑，但不提供跨进程事务锁。
 
+先预览差异，再按预览版本修改并留备份：
+
+```json
+{"connectionName":"dev","remotePath":"/home/user/app/config.txt","edits":[{"oldText":"port=3000","newText":"port=4000"}],"dryRun":true}
+```
+
+预览不创建任何文件，返回 unified diff 和原始内容的 `beforeSha256`。执行时使用相同的 `edits`，把返回的哈希填入 `expectedSha256`，设置 `dryRun: false`、`backup: true`。哈希不匹配会拒绝修改。为兼容现有调用，`ssh_file_edit` 的 `dryRun` 与 `backup` 都默认关闭。
+
+备份位于原文件旁，文件名追加 `.ssh-agent-backup-<随机标识>`，权限为 `0600`，路径通过 `backupPath` 返回。备份失败会中止替换；替换失败时可能保留备份，错误中会给出路径。备份保留原始 UTF-8 BOM 和换行字节，不自动清理；恢复时先读取并核对备份，再用文件写入工具恢复。日志清理工具不会删除这些远端备份。
+
+预览 diff 最多返回 65,536 字符，并有计算预算。`diffTruncated: true` 表示差异被截断或因预算未生成，不应当作完整补丁；内容哈希仍针对完整文件。最终内容超过 4 MiB 会在写入前拒绝；无实际变化时不写入或备份。
+
 ## 搜索代码与日志
 
 `ssh_file_grep` 的正则搜索：
@@ -98,6 +110,14 @@
 ```
 
 用 `ssh_session_read` 读取输出；后续将返回的 `nextOffsetChars` 作为 `offsetChars` 继续读取。内存保留约 1 Mi 字符，完整落盘日志用 `ssh_session_log` 和 `offsetBytes` 分页读取，停止后仍保留。
+
+创建时可设置 `cols` / `rows`，默认 120×30，范围均为 1–1000。调整已有终端时调用 `ssh_session_resize`：
+
+```json
+{"sessionName":"work","cols":132,"rows":42}
+```
+
+两种后端都把尺寸变化传到远端 PTY，影响交互程序布局；可输入 `stty size` 验证。`ensure` 复用现有终端时不会改变其尺寸，需显式调用 resize。升级前启动的旧 worker 需停止并重新创建后才能支持此操作。tmux 观察窗口的本地尺寸与远端 PTY 尺寸分别管理。
 
 ## 诊断、热加载与日志清理
 
