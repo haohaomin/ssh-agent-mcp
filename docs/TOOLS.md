@@ -1,6 +1,18 @@
 # MCP 工具参考
 
-由 `npm run docs:tools` 从实际工具定义生成。共 26 个工具。参数统一使用 camelCase，时间单位为毫秒，偏移明确区分字节和字符。
+由 `npm run docs:tools` 从实际工具定义生成。共 29 个工具。参数统一使用 camelCase，时间单位为毫秒，偏移明确区分字节和字符。
+
+## ssh_config_reload
+
+Reload the original startup configuration (OpenSSH or JSON), retaining CLI overrides and restrictions. Unchanged ssh2 connections stay open; changed/removed connections and native OpenSSH connections close. Detached terminals retain their original configuration; stop them before changing that configuration. No new connections are opened.
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {}
+}
+```
 
 ## ssh_directory_list
 
@@ -650,6 +662,24 @@ Show state (running/exited/killed/lost), exit code, elapsed time and output of a
 }
 ```
 
+## ssh_server_diagnose
+
+Diagnose one SSH connection without exposing credentials: backend, local dependencies, known_hosts, connection and SFTP probes.
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "connectionName": {
+      "description": "Configured connection name; defaults to the first configured connection",
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}
+```
+
 ## ssh_server_list
 
 List all available SSH server configurations
@@ -760,6 +790,34 @@ Read the complete persisted terminal transcript using byte offsets, including af
   "required": [
     "sessionName"
   ]
+}
+```
+
+## ssh_session_log_cleanup
+
+Preview or remove logs and metadata for stopped durable sessions whose workers have exited. Dry-run is enabled by default. maxTotalBytes caps retained eligible logs; active workers and unknown state are skipped.
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "maxAgeDays": {
+      "default": 30,
+      "type": "number",
+      "minimum": 0,
+      "maximum": 36500
+    },
+    "maxTotalBytes": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "dryRun": {
+      "default": true,
+      "type": "boolean"
+    }
+  }
 }
 ```
 

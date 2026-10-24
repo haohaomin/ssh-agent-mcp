@@ -37,7 +37,9 @@ process.once('message',async({sessionName,connectionName,config,options,paths}:a
         else if(method==='write')result=manager.interactive.write(sessionName,args.input);
         else if(method==='stop'){result=manager.interactive.stop(sessionName);stop=true;}
         else throw new Error('Unknown session operation');
-        socket.end(JSON.stringify({result})+'\n',()=>{if(stop){cleanup();process.exit(0);}});
+        // A stop reply acknowledges persisted metadata and finished cleanup.
+        if(stop)cleanup();
+        socket.end(JSON.stringify({result})+'\n',()=>{if(stop)process.exit(0);});
       }catch(e){socket.end(JSON.stringify({error:(e as Error).message})+'\n');}
     });});
     await new Promise<void>((resolve,reject)=>{server!.once('error',reject);server!.listen(socketPath,resolve);});fs.chmodSync(socketPath,0o600);

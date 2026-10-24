@@ -139,8 +139,10 @@ export class SshMcpServer {
    * Run the server
    */
   public async run(): Promise<void> {
-    const parsedArgs = CommandLineParser.parseArgs();
+    const startupArgs = process.argv.slice(2);
+    const parsedArgs = CommandLineParser.parseArgs(startupArgs);
     this.sshManager.setConfig(parsedArgs.configs);
+    this.sshManager.setConfigLoader(() => CommandLineParser.parseArgs(startupArgs, true).configs);
     this.registerShutdownHandlers(parsedArgs.mcpTransport);
 
     if (parsedArgs.mcpTransport === "http") {

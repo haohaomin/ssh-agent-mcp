@@ -158,9 +158,9 @@ export class CommandLineParser {
   /**
    * Parse command line arguments
    */
-  public static parseArgs(): ParsedArgs {
+  public static parseArgs(args: string[] = process.argv.slice(2), strictImport = false): ParsedArgs {
     const { values, positionals } = parseArgs({
-      args: process.argv.slice(2),
+      args,
       options: {
         "config-file": { type: "string" },
         "import-ssh-config": { type: "boolean" },
@@ -198,6 +198,7 @@ export class CommandLineParser {
     const configMap: SshConnectionConfigMap = Object.create(null);
     if (values["import-ssh-config"]) {
       const result = importOpenSsh(values["ssh-config-file"], values.host?.split(",").map(h => h.trim()).filter(Boolean));
+      if(strictImport && Object.keys(result.skipped).length) throw new Error('SSH config reload contains invalid hosts');
       for (const warning of result.warnings) console.error(`[import] ${warning}`);
       for (const [name, reason] of Object.entries(result.skipped)) console.error(`[import] Skipped ${name}: ${reason}`);
       for (const [name, imported] of Object.entries(result.configs)) {

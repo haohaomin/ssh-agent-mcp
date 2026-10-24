@@ -2,7 +2,7 @@
 
 **让 AI 复用你的 SSH 配置，完成远程开发与运维。**
 
-一个 TypeScript MCP 服务，提供 **26 个工具**：命令执行、文件传输与编辑、搜索、目录同步、持久终端、后台任务和双向端口转发。常规连接使用 ssh2；OpenSSH 特有配置自动交给本机 `ssh`，使用同一套工具和参数。
+一个 TypeScript MCP 服务，提供 **29 个工具**：命令执行、文件传输与编辑、搜索、目录同步、持久终端、后台任务、双向端口转发、连接诊断、配置热加载和日志清理。常规连接使用 ssh2；OpenSSH 特有配置自动交给本机 `ssh`，使用同一套工具和参数。
 
 [文档网站](https://haohaomin.github.io/ssh-agent-mcp/) · [工具参考](docs/TOOLS.md) · [配置说明](docs/CONFIGURATION.md) · [使用示例](docs/USAGE.md) · [测试报告](docs/TEST_REPORT.md)
 
@@ -104,16 +104,17 @@ node build/index.js --config-file servers.json
 
 **后端按配置选择，与调用哪一种工具无关。** `HostName`、`User`、`Port`、单个密钥、`ProxyJump` 等可映射到 ssh2；证书、`Match`、`ProxyCommand` 和其他未映射选项转交 OpenSSH。保守切换可能由普通选项触发，不一定是复杂配置。完整规则见 [配置说明](docs/CONFIGURATION.md)。
 
-## 统一的 26 个工具
+## 统一的 29 个工具
 
 | 类别 | 工具 |
 |---|---|
-| 连接与命令 | `ssh_server_list`、`ssh_exec` |
+| 连接与命令 | `ssh_server_list`、`ssh_server_diagnose`、`ssh_config_reload`、`ssh_exec` |
 | 传输 | `ssh_upload`、`ssh_download` |
 | 文件操作 | `ssh_file_read`、`ssh_file_write`、`ssh_file_edit`、`ssh_directory_list` |
 | 搜索 | `ssh_file_grep`、`ssh_file_glob` |
 | 同步 | `ssh_sync` |
 | 持久终端 | `ssh_session_start`、`ssh_session_ensure`、`ssh_session_list`、`ssh_session_read`、`ssh_session_write`、`ssh_session_log`、`ssh_session_stop` |
+| 日志维护 | `ssh_session_log_cleanup` |
 | 后台任务 | `ssh_job_start`、`ssh_job_status`、`ssh_job_kill`、`ssh_job_list` |
 | 端口转发 | `ssh_forward_start`、`ssh_forward_reverse`、`ssh_forward_list`、`ssh_forward_stop` |
 
@@ -126,6 +127,9 @@ node build/index.js --config-file servers.json
 - **同步先预览**：`ssh_sync` 默认 `dryRun: true`；真正同步需要 `dryRun: false`。删除额外目标文件需显式设置 `deleteExtra: true`，同步没有事务回滚。
 - **终端独立存活**：MCP 重启不会结束终端；使用 `ssh_session_stop` 关闭。`autoClose: true` 会在远端 shell 退出后回收 worker 和 tmux 观察窗口。机器重启或 SSH 断线不能恢复原 shell。
 - **日志本地保存**：默认 `~/.local/state/ssh-agent-mcp`，文件权限 `0600`；完整终端输出可能包含敏感内容，需按需清理。可用 `SSH_AGENT_STATE_DIR` 修改位置。
+- **日志清理先预览**：`ssh_session_log_cleanup` 默认 `dryRun: true`，只处理已结束的会话。检查候选项后再传 `dryRun: false` 删除日志与元数据；可用 `maxAgeDays` 和 `maxTotalBytes` 设定清理阈值。
+- **配置热加载**：`ssh_config_reload` 无需参数，重读启动时的 JSON/OpenSSH 配置并保留命令行覆盖。未变化的 ssh2 连接保持开启，变化/移除的连接和原生 OpenSSH 连接断开后按需重连。修改配置前先停止对应持久终端。
+- **连接诊断**：`ssh_server_diagnose` 检查 SSH 连接与 SFTP，并报告本机 ssh/rsync、known_hosts 和原生配置文件状态；不返回密码或密钥内容。
 - **配置命令在连接时运行**：导入不执行 `Match exec` / `ProxyCommand`，原生连接时由 OpenSSH 执行。
 - **权限遵循你的连接**：可配置命令过滤及本地/远端路径范围；交互 shell 和 rsync 要求未配置命令过滤的连接。命令过滤不等同远端系统沙箱。
 - **文件编辑与搜索有边界**：原子编辑需要 SFTP POSIX rename 扩展；搜索有资源预算并报告截断。详细行为见 [使用示例](docs/USAGE.md) 和 [功能检查](docs/FEATURE_AUDIT.md)。
@@ -152,7 +156,7 @@ npm run docs:serve       # 在本机预览网站
 npm pack --dry-run      # 检查分发包
 ```
 
-截至 **2026-10-24**，完整功能回归 **290 项通过**。两种后端分别经真实 MCP 客户端实测全部 26 个工具；另有证书、加密密钥、主机公钥拒绝、终端恢复与 tmux 窗口测试。这是测试快照，完整范围见 [测试报告](docs/TEST_REPORT.md)。
+截至 **2026-10-24**，完整功能回归 **296 项通过**。两种后端分别经真实 MCP 客户端实测全部 29 个工具；另有证书、加密密钥、主机公钥拒绝、终端恢复与 tmux 窗口测试。这是测试快照，完整范围见 [测试报告](docs/TEST_REPORT.md)。
 
 真实网络测试需要本机 `sshd`、`ssh-keygen`、`ssh`、`rsync` 和 `tmux`，使用临时密钥与 loopback SSH 服务。测试方法见 [测试文档](test/README.md)。文档网站的 GitHub Pages 构建与发布见 [网站维护](docs/PAGES.md)。
 

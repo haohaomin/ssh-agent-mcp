@@ -30,6 +30,7 @@ import type { Duplex } from "node:stream";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { StringDecoder } from "node:string_decoder";
+import { isDeepStrictEqual } from "node:util";
 
 const require = createRequire(import.meta.url);
 
@@ -256,6 +257,7 @@ export class SSHConnectionManager {
   // needs one decoder for its whole lifetime rather than a decode per chunk.
   private shellDecoders: Map<string, StringDecoder> = new Map();
   private defaultName: string = "default";
+  private configLoader?: () => SshConnectionConfigMap;
 
   readonly interactive = new InteractiveService(this);
   private constructor() {}
@@ -300,6 +302,58 @@ export class SSHConnectionManager {
       this.defaultName = Object.keys(configs)[0];
     }
   }
+
+  /**
+   * Replace configurations while keeping connections whose effective config
+   * did not change. This is used by the MCP config reload tool.
+   */
+  public reloadConfig(
+    configs: SshConnectionConfigMap,
+    defaultName?: string,
+  ): { added: string[]; changed: string[]; removed: string[]; preserved: string[] } {
+    // Validate everything before mutating live connections or policy caches.
+    const whitelists = new Map<string, RegExp[]>(), blacklists = new Map<string, RegExp[]>();
+    for (const [name, config] of Object.entries(configs)) {
+      whitelists.set(name, this.compilePatterns(config.commandWhitelist, name, "whitelist"));
+      blacklists.set(name, this.compilePatterns(config.commandBlacklist, name, "blacklist"));
+    }
+    if (this.pendingConnections.size) throw new Error("Connections are still opening; retry reload after they settle");
+    const previous = this.configs;
+    const names = new Set([...Object.keys(previous), ...Object.keys(configs)]);
+    const added: string[] = [], changed: string[] = [], removed: string[] = [], preserved: string[] = [];
+    const same = (left: SSHConfig | undefined, right: SSHConfig | undefined) =>
+      left !== undefined && right !== undefined && left.backend !== 'openssh' && isDeepStrictEqual(left, right);
+
+    for (const name of names) {
+      if (!previous[name]) added.push(name);
+      else if (!configs[name]) removed.push(name);
+      else if (same(previous[name], configs[name])) preserved.push(name);
+      else changed.push(name);
+    }
+
+    for (const name of [...removed, ...changed]) {
+      if (this.clients.has(name) || this.connected.has(name) || this.pendingConnections.has(name)) {
+        this.invalidateConnection(name);
+      }
+      this.statusCache.delete(name);
+    }
+
+    this.commandWhitelistRegexes = whitelists;
+    this.commandBlacklistRegexes = blacklists;
+    this.configs = configs;
+    if (defaultName && configs[defaultName]) this.defaultName = defaultName;
+    else if (!configs[this.defaultName] && Object.keys(configs).length > 0) this.defaultName = Object.keys(configs)[0];
+    return { added, changed, removed, preserved };
+  }
+
+  public setConfigLoader(loader: () => SshConnectionConfigMap): void { this.configLoader = loader; }
+
+  public reloadFromSource() {
+    if (!this.configLoader) throw new Error("No startup configuration source registered");
+    return this.reloadConfig(this.configLoader());
+  }
+
+  public getDefaultConnectionName(): string { return this.defaultName; }
 
   /**
    * Get specified connection configuration
@@ -404,6 +458,7 @@ export class SSHConnectionManager {
       };
 
       client.on("ready", async () => {
+        if (settled) { client.destroy(); return; }
         Logger.log(
           `Successfully connected to SSH server [${key}] ${config.host}:${config.port}`,
         );
@@ -439,8 +494,7 @@ export class SSHConnectionManager {
 
       client.on("error", (err: Error) => {
         if (config.backend === "openssh") client.destroy();
-        this.connected.set(key, false);
-        if (this.clients.get(key) === client || this.shellStreams.has(key)) {
+        if (this.clients.get(key) === client) {
           this.invalidateConnection(key);
         }
         rejectOnce(
@@ -453,7 +507,7 @@ export class SSHConnectionManager {
       });
 
       client.on("close", () => {
-        this.clearConnectionState(key);
+        if (this.clients.get(key) === client) this.clearConnectionState(key);
         Logger.log(`SSH connection [${key}] closed`, "info");
       });
 
