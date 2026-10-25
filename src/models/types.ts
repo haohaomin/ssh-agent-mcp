@@ -121,4 +121,6 @@ export interface ParsedArgs {
   preConnect: boolean;
   mcpTransport: McpTransport;
   http: HttpListenConfig;
+  ui: boolean;
+  uiPath: string;
 }

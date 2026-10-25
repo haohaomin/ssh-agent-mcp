@@ -1,0 +1,39 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SSH Workbench</title>
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="favicon.svg">
+<div id="app" aria-live="polite">
+  <aside class="sidebar">
+    <div class="brand"><span class="brand-mark">›_</span><span>ssh-agent</span></div>
+    <nav class="nav" aria-label="工作区">
+      <button data-view="overview">⌂ <span>概览</span></button>
+      <button data-view="terminal">›_ <span>终端会话</span></button>
+      <button data-view="files">□ <span>文件管理</span></button>
+      <button data-view="tasks">☷ <span>后台任务</span></button>
+      <button data-view="forwards">↔ <span>端口转发</span></button>
+    </nav>
+    <div class="side-label">当前服务器</div>
+    <div id="servers" class="servers"></div>
+    <button id="import-config" class="outline full">↓ 导入 SSH 配置</button>
+    <div class="side-source">来源：~/.ssh/config</div>
+  </aside>
+  <main class="main">
+    <header class="page-head"><h1 id="page-title">概览</h1><span>本机工作台</span></header>
+    <section id="host-bar" class="host-bar" hidden>
+      <div><div class="host-name"><strong id="host-name"></strong><span id="env-tag" class="tag"></span></div><div id="host-address" class="muted"></div></div>
+      <div class="connection"><i id="connection-dot"></i><span id="connection-label">已连接</span><button id="connection-details" class="outline">连接详情</button></div>
+    </section>
+    <aside id="details" class="details" hidden><div class="details-head"><strong>连接详情</strong><button id="close-details" class="icon-button">×</button></div><dl><dt>配置来源</dt><dd>~/.ssh/config</dd><dt>连接方式</dt><dd>自动选择 · SSH Agent</dd><dt>状态</dt><dd id="detail-status"></dd></dl><div class="actions"><button id="diagnose" class="outline">运行诊断</button><button id="reconnect" class="primary">重新连接</button></div><p id="diagnosis" class="muted"></p></aside>
+    <section id="view-overview" class="view">
+      <div class="cards"><article class="card"><span class="eyebrow">你的服务器</span><strong id="server-count">—</strong><span class="card-foot" id="connected-count">—</span></article><article class="card"><h2>从本机配置开始</h2><p>读取已有的 SSH 配置，统一管理连接、终端和远端文件。</p><button id="import-main" class="primary">导入 SSH 配置</button></article></div>
+      <div class="section-head"><h2>继续工作</h2><span class="muted">最近会话</span></div><article class="session-row"><span class="session-icon">›_</span><div><strong>SSH 会话</strong><small>选择服务器后查看持久终端</small></div><button data-view="terminal" class="outline">打开终端</button></article>
+    </section>
+    <section id="view-terminal" class="view" hidden><div class="panel"><div class="session-tabs" id="session-tabs"></div><button id="new-session" class="outline">＋ 新建</button></div><div class="panel session-tools"><span id="session-description" class="muted">持久会话</span><div class="actions"><span id="session-mode" class="blue">观察中</span><button id="rename-session" class="outline">重命名</button><button id="takeover" class="outline">接管输入</button></div></div><div id="rename-row" class="rename-row" hidden><label>会话名称 <input id="session-name" maxlength="40"></label><button id="save-name" class="outline">保存</button></div><div class="terminal panel"><pre id="terminal-output"></pre><div class="prompt"><span>$</span><input id="command" aria-label="终端命令" placeholder="只读观察中" disabled></div><pre id="command-output"></pre></div><div class="panel-foot"><span id="input-owner">输入权：AI · 你正在观察</span><span>会话持续运行</span></div></section>
+    <section id="view-files" class="view" hidden><div class="panel file-toolbar"><span id="file-path">/srv/app</span><div class="actions"><button id="refresh-files" class="outline">刷新</button><button id="upload-file" class="outline">上传</button></div></div><div class="file-layout panel"><div id="file-list" class="file-list"></div><div class="editor"><div class="editor-head"><strong id="file-name">选择文件</strong><span id="edit-state" class="muted">—</span></div><textarea id="file-content" spellcheck="false" aria-label="文件内容" disabled></textarea></div></div><div id="file-actions" class="panel-foot" hidden><span class="muted">修改后先预览差异，再写入远端</span><button id="preview-file" class="primary">预览修改</button></div><div id="file-preview" class="panel" hidden><div class="editor-head"><strong>确认文件修改</strong><button id="back-edit" class="outline">返回编辑</button></div><div class="diff"><div><small>修改前</small><pre id="before-file"></pre></div><div><small>修改后</small><pre id="after-file"></pre></div></div><div class="panel-foot"><label><input id="backup-file" type="checkbox" checked> 写入前备份原文件</label><button id="apply-file" class="primary">确认写入</button></div></div></section>
+    <section id="view-tasks" class="view" hidden><div class="panel section-head"><h2>后台任务</h2><span class="muted">关闭页面后继续执行</span></div><article class="task-row panel"><div><strong>持久任务</strong><small>由 MCP 或终端创建的后台任务</small></div><span class="muted">请通过 MCP 工具启动任务</span></article></section>
+    <section id="view-forwards" class="view" hidden><div class="panel section-head"><h2>端口转发</h2><span class="muted">仅绑定本机回环地址</span></div><article class="task-row panel"><div><strong>当前转发</strong><small>通过 MCP 工具创建的端口转发会显示在这里</small></div><span class="muted">暂无转发</span></article></section>
+    <div id="notice" class="notice" hidden role="status"></div>
+  </main>
+</div>
+<script type="module" src="app.js"></script>

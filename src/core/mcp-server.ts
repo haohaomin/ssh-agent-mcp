@@ -146,9 +146,12 @@ export class SshMcpServer {
     this.registerShutdownHandlers(parsedArgs.mcpTransport);
 
     if (parsedArgs.mcpTransport === "http") {
-      this.httpServer = new McpHttpServer(parsedArgs.http, () => this.createMcpServer());
+      this.httpServer = new McpHttpServer(parsedArgs.http, () => this.createMcpServer(), this.sshManager, parsedArgs.ui ? parsedArgs.uiPath : undefined);
       const endpoint = await this.httpServer.listen();
       Logger.log(`MCP HTTP server listening on ${endpoint}`);
+      if (parsedArgs.ui) {
+        Logger.log(`SSH Workbench available at ${endpoint.replace(parsedArgs.http.path, `${parsedArgs.uiPath}/`)}`);
+      }
     } else {
       this.server = this.createMcpServer();
       const transport = new StdioServerTransport();

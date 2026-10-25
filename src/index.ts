@@ -37,6 +37,8 @@ Options:
   --http-port <port>              Listen port for HTTP transport (default: 3000)
   --http-path <path>              Endpoint path for HTTP transport (default: /mcp)
   --http-token <token>            Bearer token for HTTP; falls back to SSH_MCP_HTTP_TOKEN
+  --ui                            Serve the local SSH Workbench at /ui
+  --ui-path <path>                Workbench URL path (default: /ui)
   --version, -v                   Print package version
   --help                          Print this help message`;
 

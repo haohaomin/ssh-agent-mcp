@@ -191,6 +191,8 @@ export class CommandLineParser {
         "http-port": { type: "string" },
         "http-path": { type: "string" },
         "http-token": { type: "string" },
+        ui: { type: "boolean" },
+        "ui-path": { type: "string" },
       },
       allowPositionals: true,
     });
@@ -539,16 +541,20 @@ export class CommandLineParser {
       }
     }
 
+    const ui = values.ui === true;
+    const uiPath = this.parseHttpPath(values["ui-path"] ?? "/ui");
     return {
       configs: configMap,
       preConnect: values["pre-connect"] === true,
-      mcpTransport: this.parseMcpTransport(values["mcp-transport"]),
+      mcpTransport: ui ? "http" : this.parseMcpTransport(values["mcp-transport"]),
       http: {
         host: this.parseHttpHost(values["http-host"]),
         port: this.parseHttpPort(values["http-port"]),
         path: this.parseHttpPath(values["http-path"]),
         token: this.parseHttpToken(values["http-token"]),
       },
+      ui,
+      uiPath,
     };
   }
 

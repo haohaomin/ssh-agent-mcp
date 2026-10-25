@@ -148,6 +148,16 @@ SSH_MCP_HTTP_TOKEN='replace-with-your-token' \
 
 默认端点 `http://127.0.0.1:3000/mcp`。客户端发送 `Authorization: Bearer <token>`。HTTP 客户端共享连接、终端与转发，面向同一可信用户，不提供多租户隔离。
 
+### 本机 SSH Workbench
+
+需要人工查看终端、文件差异或连接状态时，可以同时启动本机网页工作台：
+
+```bash
+node build/index.js --ui --import-ssh-config --http-port 3000
+```
+
+然后打开 `http://127.0.0.1:3000/ui/`。工作台和 MCP 使用同一个连接管理器，支持服务器切换、持久终端观察与接管、文件浏览/编辑预览/备份，以及连接诊断。`--ui` 会自动启用 HTTP 传输；默认只监听回环地址。工作台不把私钥或密码发送到浏览器，网页请求仍受 `--http-token` / `SSH_MCP_HTTP_TOKEN` 保护。
+
 ## 开发与验证
 
 ```bash

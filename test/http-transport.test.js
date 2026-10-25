@@ -188,6 +188,24 @@ describe('loopback host detection', () => {
 });
 
 describe('MCP HTTP transport', () => {
+  it('serves the local SSH Workbench and its server summary when --ui is enabled', async () => {
+    const { child, tmpDir } = startServer(['--ui']);
+    try {
+      const output = await waitForOutput(child.stderr, endpointPattern);
+      const endpoint = output.match(endpointPattern)[1];
+      const ui = new URL(endpoint);
+      ui.pathname = '/ui/';
+      const page = await fetch(ui);
+      assert.strictEqual(page.status, 200);
+      assert.match(await page.text(), /SSH Workbench/);
+      const summary = await fetch(new URL('/ui/api/servers', endpoint));
+      assert.strictEqual(summary.status, 200);
+      assert.deepStrictEqual((await summary.json()).servers.map(server => server.name), ['test']);
+    } finally {
+      await stopServer(child, tmpDir);
+    }
+  });
+
   it('serves initialize and tools/list, and exits on SIGTERM', async () => {
     const { child, tmpDir } = startServer(['--http-host', '127.0.0.1']);
 
@@ -233,6 +251,7 @@ describe('MCP HTTP transport', () => {
     const { child, tmpDir } = startServer([
       '--http-host', '127.0.0.1',
       '--http-token', 'test-token',
+      '--ui',
     ]);
 
     try {
@@ -248,6 +267,13 @@ describe('MCP HTTP transport', () => {
       const accepted = await postJson(endpoint, initializeBody, 'Bearer test-token');
       assert.strictEqual(accepted.status, 200);
       assert.strictEqual(accepted.json?.result?.serverInfo?.name, 'ssh-agent-mcp');
+
+      const page = await fetch(new URL('/ui/', endpoint));
+      assert.strictEqual(page.status, 200);
+      const api = await fetch(new URL('/ui/api/servers', endpoint));
+      assert.strictEqual(api.status, 401);
+      const authorizedApi = await fetch(new URL('/ui/api/servers', endpoint), { headers: { authorization: 'Bearer test-token' } });
+      assert.strictEqual(authorizedApi.status, 200);
     } finally {
       await stopServer(child, tmpDir);
     }

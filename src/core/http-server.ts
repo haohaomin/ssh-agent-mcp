@@ -5,6 +5,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { HttpListenConfig } from "../models/types.js";
 import { Logger } from "../utils/logger.js";
+import { WebUi } from "./web-ui.js";
+import type { SSHConnectionManager } from "../services/ssh-connection-manager.js";
 
 const JSON_RPC_HEADERS = {
   "Content-Type": "application/json",
@@ -95,7 +97,13 @@ export class McpHttpServer {
   constructor(
     private readonly config: HttpListenConfig,
     private readonly createMcpServer: () => McpServer,
-  ) {}
+    manager?: SSHConnectionManager,
+    uiPath?: string,
+  ) {
+    this.ui = manager && uiPath ? new WebUi(manager, uiPath) : undefined;
+  }
+
+  private readonly ui?: WebUi;
 
   async listen(): Promise<string> {
     const httpServer = createServer((req, res) => {
@@ -203,6 +211,18 @@ export class McpHttpServer {
         return;
       }
 
+      if (this.ui?.matches(pathname)) {
+        // Static UI assets are harmless and must load so the browser can show
+        // its token prompt. API calls remain protected by the HTTP bearer token.
+        if (this.ui.isApi(pathname) && !this.authorized(req)) {
+          res.setHeader("WWW-Authenticate", 'Bearer realm="ssh-mcp-server"');
+          writeJson(res, 401, { jsonrpc: "2.0", error: { code: -32001, message: "Unauthorized" }, id: null });
+          return;
+        }
+        await this.ui.handle(req, res, pathname);
+        return;
+      }
+
       if (pathname !== this.config.path) {
         writeJson(res, 404, {
           jsonrpc: "2.0",
@@ -265,4 +285,5 @@ export class McpHttpServer {
       });
     }
   }
+
 }
