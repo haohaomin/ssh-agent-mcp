@@ -32,6 +32,8 @@ function setView(view) {
   $('#details').hidden = true;
   if (view === 'terminal') loadSessions();
   if (view === 'files') loadFiles('/');
+  if (view === 'tasks') loadTasks();
+  if (view === 'forwards') loadForwards();
 }
 
 function renderServers() {
@@ -100,6 +102,24 @@ async function loadFiles(path) {
   try { const result = await request(`/files?path=${encodeURIComponent(path)}&connectionName=${encodeURIComponent(connectionName() || '')}`); const list = $('#file-list'); list.replaceChildren(...(result.entries || []).map(entry => { const button = document.createElement('button'); button.textContent = `${entry.type === 'directory' ? '▾ ' : ''}${entry.name}`; button.addEventListener('click', () => entry.type === 'directory' ? loadFiles(`${path.replace(/\/$/, '')}/${entry.name}`) : loadFile(`${path.replace(/\/$/, '')}/${entry.name}`)); return button; })); if (!result.entries?.length) list.innerHTML = '<span class="muted">目录为空或不可访问</span>'; } catch (error) { fail(error); }
 }
 async function loadFile(path) { try { const result = await request(`/file?path=${encodeURIComponent(path)}&connectionName=${encodeURIComponent(connectionName() || '')}`); state.file = path; state.original = result.content || ''; state.draft = state.original; $('#file-path').textContent = path; $('#file-preview').hidden = true; renderFile(); } catch (error) { fail(error); } }
+async function loadTasks() { try { const result = await request(`/jobs?connectionName=${encodeURIComponent(connectionName() || '')}`); $('#task-list').innerHTML = result.output ? `<pre>${escapeHtml(result.output)}</pre>` : '<span class="muted">暂无后台任务</span>'; } catch (error) { fail(error); } }
+async function loadForwards() {
+  try {
+    const result = await request('/forwards');
+    const rows = result.map(forward => {
+      const row = document.createElement('div');
+      row.className = 'forward-row';
+      row.innerHTML = `<span><strong>${escapeHtml(forward.direction || 'local')} · ${escapeHtml(String(forward.localPort || forward.remotePort || ''))}</strong><small>${escapeHtml(forward.connectionName || '')}</small></span><button class="outline">停止转发</button>`;
+      row.querySelector('button').addEventListener('click', async () => {
+        try { await request('/forwards/stop', { method: 'POST', body: JSON.stringify({ forwardId: forward.forwardId }) }); loadForwards(); }
+        catch (error) { fail(error); }
+      });
+      return row;
+    });
+    if (!rows.length) { const empty = document.createElement('span'); empty.className = 'muted'; empty.textContent = '暂无端口转发'; rows.push(empty); }
+    $('#forward-list').replaceChildren(...rows);
+  } catch (error) { fail(error); }
+}
 
 function escapeHtml(value) { return String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char])); }
 async function previewFile() { $('#before-file').textContent = state.original; $('#after-file').textContent = state.draft; $('#file-preview').hidden = false; }

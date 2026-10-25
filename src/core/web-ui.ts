@@ -75,6 +75,10 @@ export class WebUi {
     if (suffix === "/api/connect" && req.method === "POST") { const data = await body(req); await this.manager.connect(data.connectionName); return json(res, 200, { connected: data.connectionName || this.manager.getDefaultConnectionName() }); }
     if (suffix === "/api/command" && req.method === "POST") { const data = await body(req); return json(res, 200, { output: await this.manager.executeCommand(String(data.command || ""), data.cwd, data.connectionName, { timeout: data.timeoutMs }) }); }
     if (suffix === "/api/sessions" && req.method === "GET") return json(res, 200, await this.sessions.list());
+    if (suffix === "/api/jobs" && req.method === "GET") return json(res, 200, { output: await this.manager.jobList(100, url.searchParams.get("connectionName") || undefined) });
+    if (suffix === "/api/jobs/kill" && req.method === "POST") { const data = await body(req); return json(res, 200, { output: await this.manager.jobKill(String(data.jobId), data.connectionName) }); }
+    if (suffix === "/api/forwards" && req.method === "GET") return json(res, 200, this.manager.interactive.listForwards());
+    if (suffix === "/api/forwards/stop" && req.method === "POST") { const data = await body(req); return json(res, 200, this.manager.interactive.stopForward(String(data.forwardId))); }
     if (suffix === "/api/sessions/start" && req.method === "POST") { const data = await body(req); return json(res, 200, await this.sessions.start(String(data.sessionName), data.connectionName, Boolean(data.ensure), data)); }
     const session = /^\/api\/sessions\/([^/]+)(?:\/(read|write|resize|stop))?$/.exec(suffix);
     if (session) {
