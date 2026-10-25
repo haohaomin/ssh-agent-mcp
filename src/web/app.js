@@ -135,6 +135,8 @@ $('#diagnose').addEventListener('click', () => { $('#diagnosis').textContent = a
 $('#reconnect').addEventListener('click', () => chooseHost(state.host));
 $('#new-session').addEventListener('click', createSession);
 $('#refresh-files').addEventListener('click', () => loadFiles('/'));
+$('#upload-file').addEventListener('click', () => $('#upload-input').click());
+$('#upload-input').addEventListener('change', async event => { const file = event.target.files?.[0]; if (!file) return; try { const content = await file.text(); const directory = $('#file-path').textContent || '/'; const remotePath = `${directory.replace(/\/$/, '')}/${file.name}`; await request('/file/create', { method: 'POST', body: JSON.stringify({ remotePath, content, connectionName: connectionName() }) }); say(`已上传 ${file.name}`); await loadFiles(directory); } catch (error) { fail(error); } event.target.value = ''; });
 $('#file-content').addEventListener('input', event => { state.draft = event.target.value; renderFile(); });
 $('#preview-file').addEventListener('click', previewFile);
 $('#back-edit').addEventListener('click', () => { $('#file-preview').hidden = true; });

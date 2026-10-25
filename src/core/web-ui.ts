@@ -98,6 +98,7 @@ export class WebUi {
       return json(res, 200, { path: url.searchParams.get("path"), content });
     }
     if (suffix === "/api/file/edit" && req.method === "POST") { const data = await body(req); return json(res, 200, await this.files.edit(String(data.remotePath), data.edits, data.connectionName, data)); }
+    if (suffix === "/api/file/create" && req.method === "POST") { const data = await body(req); return json(res, 200, await this.files.create(String(data.remotePath), String(data.content || ""), data.connectionName)); }
     json(res, 404, { error: "Not found" });
   }
 }
