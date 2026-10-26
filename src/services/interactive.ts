@@ -11,6 +11,8 @@ type Session = { id: string; connectionName?: string; channel: ClientChannel; co
 function dimensions(cols:number,rows:number){if(!Number.isInteger(cols)||!Number.isInteger(rows)||cols<1||cols>1000||rows<1||rows>1000)throw new Error('Terminal cols and rows must be integers between 1 and 1000');}
 export class InteractiveService {
   private generation = 0;
+  private pendingLocalForwards = 0;
+  private pendingRemoteForwards = 0;
   private sessions = new Map<string, Session>();
   private pending = new Map<string, Promise<unknown>>();
   private forwards = new Map<string, { client: Client; onClose: () => void; server: net.Server; sockets: Set<net.Socket>; connectionName?: string; host: string; port: number; remoteHost: string; remotePort: number }>();
@@ -87,10 +89,23 @@ export class InteractiveService {
     s.channel.write(input); return this.info(s);
   }
   stop(id: string) { const s = this.sessions.get(id); if (!s) throw new Error('Session not found'); s.channel.close(); this.sessions.delete(id); return { stopped: id }; }
+  private assertForwardConnection(generation: number, name?: string, client?: Client) {
+    if (generation !== this.generation) throw new Error('Server is closing');
+    if (client && this.manager.getClient(name) !== client) throw new Error('SSH connection changed while opening forward');
+  }
   async forward(remoteHost: string, remotePort: number, localPort = 0, connectionName?: string, bindHost = '127.0.0.1') {
-    if (this.forwards.size >= 32) throw new Error('Forward limit reached');
+    if (this.forwards.size + this.pendingLocalForwards >= 32) throw new Error('Forward limit reached');
+    this.pendingLocalForwards++;
+    try { return await this.openLocalForward(remoteHost, remotePort, localPort, connectionName, bindHost, this.generation); }
+    finally { this.pendingLocalForwards--; }
+  }
+  private async openLocalForward(remoteHost: string, remotePort: number, localPort: number, connectionName: string | undefined, bindHost: string, generation: number) {
     await this.manager.connect(connectionName);
+    this.assertForwardConnection(generation, connectionName);
     const client = this.manager.getClient(connectionName);
+    let closed = false;
+    const markClosed = () => { closed = true; };
+    client.once('close', markClosed);
     const sockets = new Set<net.Socket>();
     const server = net.createServer(socket => {
       sockets.add(socket); socket.on('error', () => socket.destroy()); socket.on('close', () => sockets.delete(socket));
@@ -103,7 +118,15 @@ export class InteractiveService {
       });
     });
     const id = randomUUID();
-    await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(localPort, bindHost, () => { server.removeListener('error', reject); resolve(); }); });
+    try {
+      await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(localPort, bindHost, () => { server.removeListener('error', reject); resolve(); }); });
+      if (closed) throw new Error('SSH connection closed while opening forward');
+      this.assertForwardConnection(generation, connectionName, client);
+    } catch (error) {
+      for (const socket of sockets) socket.destroy();
+      server.close();
+      throw error;
+    } finally { client.removeListener('close', markClosed); }
     server.on('error', () => { if (this.forwards.has(id)) this.stopForward(id); });
     const addr = server.address() as net.AddressInfo;
     const onClose = () => { if (this.forwards.has(id)) this.stopForward(id); };
@@ -112,10 +135,31 @@ export class InteractiveService {
     return this.listForwards().find(f => f.forwardId === id)!;
   }
   async reverseForward(localHost: string, localPort: number, remotePort = 0, connectionName?: string, bindHost = '127.0.0.1') {
-    if (this.reverseForwards.size >= 32) throw new Error('Forward limit reached');
+    if (this.reverseForwards.size + this.pendingRemoteForwards >= 32) throw new Error('Forward limit reached');
+    this.pendingRemoteForwards++;
+    try { return await this.openRemoteForward(localHost, localPort, remotePort, connectionName, bindHost, this.generation); }
+    finally { this.pendingRemoteForwards--; }
+  }
+  private async openRemoteForward(localHost: string, localPort: number, remotePort: number, connectionName: string | undefined, bindHost: string, generation: number) {
     await this.manager.connect(connectionName);
+    this.assertForwardConnection(generation, connectionName);
     const client = this.manager.getClient(connectionName);
-    const port = await new Promise<number>((resolve, reject) => client.forwardIn(bindHost, remotePort, (err, allocated) => err ? reject(err) : resolve(allocated)));
+    const cancel = (port: number) => { try { client.unforwardIn(bindHost, port, () => {}); } catch {} };
+    const port = await new Promise<number>((resolve, reject) => {
+      let done = false;
+      const finish = (error?: Error | null, allocated?: number) => {
+        if (done) { if (!error && allocated !== undefined) cancel(allocated); return; }
+        done = true; clearTimeout(timer); client.removeListener('close', onClose);
+        error ? reject(error) : resolve(allocated!);
+      };
+      const onClose = () => finish(new Error('SSH connection closed while opening forward'));
+      const timer = setTimeout(() => finish(new Error('Remote forward open timed out')), 10000);
+      client.once('close', onClose);
+      try { client.forwardIn(bindHost, remotePort, finish); }
+      catch (error) { finish(error as Error); }
+    });
+    try { this.assertForwardConnection(generation, connectionName, client); }
+    catch (error) { cancel(port); throw error; }
     const id = randomUUID(), sockets = new Set<net.Socket>();
     const handler = (info: { destPort: number }, accept: () => ClientChannel) => {
       if (info.destPort !== port) return;

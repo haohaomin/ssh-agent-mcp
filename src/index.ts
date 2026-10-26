@@ -7,6 +7,7 @@ import { Logger } from "./utils/logger.js";
 const HELP_TEXT = `Usage: ssh-agent-mcp [options] [host port username password]
 
 Import: ssh-agent-mcp import [--file <path>] [--hosts <aliases>] [--output <new-file>]
+Service: ssh-agent-mcp service status|stop
 
 Options:
   --import-ssh-config              Import ~/.ssh/config hosts (use --host to select aliases)
@@ -37,7 +38,9 @@ Options:
   --http-port <port>              Listen port for HTTP transport (default: 3000)
   --http-path <path>              Endpoint path for HTTP transport (default: /mcp)
   --http-token <token>            Bearer token for HTTP; falls back to SSH_MCP_HTTP_TOKEN
-  --ui                            Serve the local SSH Workbench at /ui
+  --ui                            Open the shared local SSH Workbench (auto-start/reuse service)
+  --no-open                       Start/reuse workbench without opening a browser
+  --standalone                    Disable shared service discovery (dedicated process)
   --ui-path <path>                Workbench URL path (default: /ui)
   --version, -v                   Print package version
   --help                          Print this help message`;
@@ -50,6 +53,11 @@ function hasArg(...names: string[]): boolean {
  * Main program entry
  */
 async function main(): Promise<void> {
+  if (process.argv[2] === 'service') {
+    const { manageServices } = await import('./core/shared-service.js');
+    await manageServices(process.argv[3]);
+    return;
+  }
   if (process.argv[2] === "import") {
     const { parseArgs } = await import("node:util");
     const { importOpenSsh } = await import("./utils/openssh-import.js");
@@ -77,6 +85,14 @@ async function main(): Promise<void> {
     return;
   }
 
+  const args = process.argv.slice(2);
+  const explicitHttp = args.includes('--mcp-transport=http') || args.some((arg,i)=>arg==='--mcp-transport' && args[i+1]==='http');
+  if (!hasArg('--standalone') && !explicitHttp) {
+    const { bridgeStdio, launchWorkbench } = await import('./core/shared-service.js');
+    if (hasArg('--ui')) await launchWorkbench(args);
+    else await bridgeStdio(args);
+    return;
+  }
   const sshMcpServer = new SshMcpServer();
   await sshMcpServer.run();
 }

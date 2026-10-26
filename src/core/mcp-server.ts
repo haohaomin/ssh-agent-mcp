@@ -138,16 +138,26 @@ export class SshMcpServer {
   /**
    * Run the server
    */
-  public async run(): Promise<void> {
-    const startupArgs = process.argv.slice(2);
+  public async run(startupArgs = process.argv.slice(2), shared?: { id: string; ready: (endpoint: string) => void }): Promise<void> {
     const parsedArgs = CommandLineParser.parseArgs(startupArgs);
     this.sshManager.setConfig(parsedArgs.configs);
     this.sshManager.setConfigLoader(() => CommandLineParser.parseArgs(startupArgs, true).configs);
     this.registerShutdownHandlers(parsedArgs.mcpTransport);
 
     if (parsedArgs.mcpTransport === "http") {
-      this.httpServer = new McpHttpServer(parsedArgs.http, () => this.createMcpServer(), this.sshManager, parsedArgs.ui ? parsedArgs.uiPath : undefined);
-      const endpoint = await this.httpServer.listen();
+      const createHttp = () => new McpHttpServer(parsedArgs.http, () => this.createMcpServer(), this.sshManager, parsedArgs.ui ? parsedArgs.uiPath : undefined,
+        shared ? { id: shared.id, stop: () => { void this.shutdown('service stop', 0); } } : undefined);
+      this.httpServer = createHttp();
+      let endpoint: string;
+      try { endpoint = await this.httpServer.listen(); }
+      catch (error) {
+        if (!shared || (error as NodeJS.ErrnoException).code !== 'EADDRINUSE') throw error;
+        await this.httpServer.close();
+        parsedArgs.http.port = 0;
+        this.httpServer = createHttp();
+        endpoint = await this.httpServer.listen();
+      }
+      shared?.ready(endpoint);
       Logger.log(`MCP HTTP server listening on ${endpoint}`);
       if (parsedArgs.ui) {
         Logger.log(`SSH Workbench available at ${endpoint.replace(parsedArgs.http.path, `${parsedArgs.uiPath}/`)}`);

@@ -17,11 +17,14 @@ async function text(sftp: SFTPWrapper, p: string, maxBytes = MAX_TEXT): Promise<
   const info = await stat(sftp, p);
   if (!info.isFile() || info.size > maxBytes) throw new Error('Expected a regular text file within the configured size limit');
   const chunks: Buffer[] = []; let length = 0;
-  for await (const chunk of sftp.createReadStream(p)) {
-    const buffer = Buffer.from(chunk); length += buffer.length;
-    if (length > maxBytes) throw new Error('Text file exceeds configured size limit');
-    chunks.push(buffer);
-  }
+  // Wait for stream cleanup as well as EOF before the caller closes SFTP.
+  await pipeline(sftp.createReadStream(p), async source => {
+    for await (const chunk of source) {
+      const buffer = Buffer.from(chunk); length += buffer.length;
+      if (length > maxBytes) throw new Error('Text file exceeds configured size limit');
+      chunks.push(buffer);
+    }
+  });
   const buffer = Buffer.concat(chunks);
   if (buffer.includes(0)) throw new Error('Binary file; use download');
   return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(buffer);
@@ -53,8 +56,19 @@ function editPreview(original: string, changed: string) {
   return { beforeSha256:hash(original), afterSha256:hash(changed), diff:patch?.slice(0,65536) ?? '', diffTruncated:patch === undefined || patch.length > 65536 };
 }
 export class RemoteFiles {
-  private locks = new Map<string, Promise<unknown>>();
-  constructor(private manager: SSHConnectionManager) {}
+  private static readonly editLocks = new WeakMap<SSHConnectionManager, Map<string, Promise<unknown>>>();
+  private readonly locks: Map<string, Promise<unknown>>;
+  constructor(private manager: SSHConnectionManager) {
+    let locks = RemoteFiles.editLocks.get(manager);
+    if (!locks) { locks = new Map(); RemoteFiles.editLocks.set(manager, locks); }
+    this.locks = locks;
+  }
+  /** Resolve the Workbench landing directory without accepting arbitrary relative paths. */
+  async initialDirectory(name?: string): Promise<string> {
+    const allowed = this.manager.getConfig(name).allowedRemotePaths?.[0];
+    if (allowed) return this.manager.validateRemotePath(allowed, name);
+    return this.manager.withSftp(name, async sftp => this.manager.validateRemotePath(await realpath(sftp, '.'), name));
+  }
   private async checked(sftp: SFTPWrapper, p: string, name?: string, creating = false): Promise<string> {
     const requested = this.manager.validateRemotePath(p, name);
     const resolved = await realpath(sftp, creating ? path.posix.dirname(requested) : requested);
@@ -66,7 +80,7 @@ export class RemoteFiles {
       const resolved = await this.checked(sftp, p, name);
       const all = await new Promise<Array<{filename: string; attrs: Stats}>>((resolve, reject) => sftp.readdir(resolved, (e, entries) => e ? reject(e) : resolve(entries)));
       const entries = all.filter(e => e.filename !== '.' && e.filename !== '..' && (includeHidden || !e.filename.startsWith('.'))).sort((a,b) => a.filename.localeCompare(b.filename));
-      return { remotePath: p, entries: entries.slice(0, maxResults).map(e => ({ name: e.filename, type: e.attrs.isSymbolicLink() ? 'symlink' : e.attrs.isDirectory() ? 'directory' : 'file', sizeBytes: e.attrs.size, modifiedAtSeconds: e.attrs.mtime })), truncated: entries.length > maxResults };
+      return { remotePath: p, resolvedPath: resolved, entries: entries.slice(0, maxResults).map(e => ({ name: e.filename, type: e.attrs.isSymbolicLink() ? 'symlink' : e.attrs.isDirectory() ? 'directory' : 'file', sizeBytes: e.attrs.size, modifiedAtSeconds: e.attrs.mtime })), truncated: entries.length > maxResults };
     });
   }
 
@@ -78,6 +92,16 @@ export class RemoteFiles {
       return { path: p, totalLines: lines.length, startLine: start, content: selected.map((line, i) => `${start + i}\t${line}`).join('\n'), nextLine: start - 1 + selected.length < lines.length ? start + selected.length : null };
     });
   }
+  /** Read complete, validated UTF-8 content for editors; never expose a truncated slice as a file. */
+  async readText(p: string, name?: string) {
+    return this.manager.withSftp(name, async sftp => {
+      const content = await text(sftp, await this.checked(sftp, p, name));
+      return { path: p, content, sha256: createHash('sha256').update(content).digest('hex') };
+    });
+  }
+  async replace(p: string, content: string, expectedSha256: string, name?: string, options: EditOptions = {}) {
+    return this.edit(p, [], name, { ...options, expectedSha256 }, content);
+  }
   async create(p: string, content: string, name?: string, permissions = 0o644) {
     return this.manager.withSftp(name, async sftp => {
       const resolved = await this.checked(sftp, p, name, true);
@@ -85,41 +109,44 @@ export class RemoteFiles {
       return { created: p, bytes: Buffer.byteLength(content) };
     });
   }
-  async edit(p: string, edits: { oldText: string; newText: string }[], name?: string, options: EditOptions = {}) {
-    const key = `${name || ''}:${p}`;
-    const before = this.locks.get(key) || Promise.resolve();
-    const work = before.catch(() => {}).then(() => this.manager.withSftp(name, async sftp => {
+  async edit(p: string, edits: { oldText: string; newText: string }[], name?: string, options: EditOptions = {}, replacement?: string) {
+    return this.manager.withSftp(name, async sftp => {
       const resolved = await this.checked(sftp, p, name);
-      const original = await text(sftp, resolved);
-      if (options.expectedSha256 && createHash('sha256').update(original).digest('hex') !== options.expectedSha256.toLowerCase()) throw new Error('File hash differs from preview; read and preview the file again');
-      const changed = applyEdits(original, edits);
-      if(Buffer.byteLength(changed)>MAX_TEXT)throw new Error('Text exceeds 4 MiB');
-      const preview = {remotePath:p,dryRun:options.dryRun ?? false,changed:changed!==original,replacements:edits.length,bytes:Buffer.byteLength(changed),...editPreview(original,changed)};
-      if(options.dryRun || changed===original)return preview;
-      const info = await stat(sftp, resolved);
-      const temp = `${resolved}.ssh-agent-${randomUUID()}`;
-      let backupPath: string | undefined;
-      try {
-        await write(sftp, temp, changed, 'wx', info.mode & 0o777);
-        if (await text(sftp, resolved) !== original) throw new Error('File changed during edit; retry after reading it');
-        if(options.backup){
-          backupPath = await this.checked(sftp, `${resolved}.ssh-agent-backup-${randomUUID()}`, name, true);
-          // Backup creation is exclusive and private; failure leaves the original untouched.
-          await write(sftp, backupPath, original, 'wx', 0o600);
-          if (await text(sftp, resolved) !== original) throw new Error('File changed while backing up; preview again');
+      const key = JSON.stringify([name || this.manager.getDefaultConnectionName(), resolved]);
+      const before = this.locks.get(key) || Promise.resolve();
+      const work = before.catch(() => {}).then(async () => {
+        const original = await text(sftp, resolved);
+        if (options.expectedSha256 && createHash('sha256').update(original).digest('hex') !== options.expectedSha256.toLowerCase()) throw new Error('File hash differs from preview; read and preview the file again');
+        const changed = replacement ?? applyEdits(original, edits);
+        if(Buffer.byteLength(changed)>MAX_TEXT)throw new Error('Text exceeds 4 MiB');
+        const preview = {remotePath:p,dryRun:options.dryRun ?? false,changed:changed!==original,replacements:edits.length,bytes:Buffer.byteLength(changed),...editPreview(original,changed)};
+        this.manager.activity?.log.detail({ diff: preview.diff, truncated: preview.diffTruncated });
+        if(options.dryRun || changed===original)return preview;
+        const info = await stat(sftp, resolved);
+        const temp = `${resolved}.ssh-agent-${randomUUID()}`;
+        let backupPath: string | undefined;
+        try {
+          await write(sftp, temp, changed, 'wx', info.mode & 0o777);
+          if (await text(sftp, resolved) !== original) throw new Error('File changed during edit; retry after reading it');
+          if(options.backup){
+            backupPath = await this.checked(sftp, `${resolved}.ssh-agent-backup-${randomUUID()}`, name, true);
+            // Backup creation is exclusive and private; failure leaves the original untouched.
+            await write(sftp, backupPath, original, 'wx', 0o600);
+            if (await text(sftp, resolved) !== original) throw new Error('File changed while backing up; preview again');
+          }
+          // Require atomic replacement; do not delete the original as a fallback.
+          await new Promise<void>((resolve, reject) => sftp.ext_openssh_rename(temp, resolved, e => e ? reject(e) : resolve()));
+          return { ...preview, edited:p, backupPath };
+        } catch(error) {
+          if(backupPath)throw new Error(`${(error as Error).message}; backup may be present at ${backupPath}`);
+          throw error;
+        } finally {
+          await new Promise<void>(resolve => sftp.unlink(temp, () => resolve()));
         }
-        // Require atomic replacement; do not delete the original as a fallback.
-        await new Promise<void>((resolve, reject) => sftp.ext_openssh_rename(temp, resolved, e => e ? reject(e) : resolve()));
-        return { ...preview, edited:p, backupPath };
-      } catch(error) {
-        if(backupPath)throw new Error(`${(error as Error).message}; backup may be present at ${backupPath}`);
-        throw error;
-      } finally {
-        await new Promise<void>(resolve => sftp.unlink(temp, () => resolve()));
-      }
-    }));
-    this.locks.set(key, work);
-    try { return await work; } finally { if (this.locks.get(key) === work) this.locks.delete(key); }
+      });
+      this.locks.set(key, work);
+      try { return await work; } finally { if (this.locks.get(key) === work) this.locks.delete(key); }
+    });
   }
   async search(root: string, query: string, kind: 'grep' | 'glob', maxResults = 100, name?: string, exclude: string[] = ['.git', '.hg', '.svn'], options: SearchOptions = {}) {
     const engine = new SearchMatcher();

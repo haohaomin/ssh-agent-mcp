@@ -10,7 +10,7 @@ import {localSshd} from './helpers/local-sshd.js';
 import {importOpenSsh} from '../build/utils/openssh-import.js';
 import {shellQuote} from '../build/utils/shell.js';
 
-for(const backend of ['ssh2','openssh']) test(`all 30 tools through real MCP stdio and sshd (${backend})`, {timeout:60000}, async t=>{
+for(const backend of ['ssh2','openssh']) test(`all 31 tools through real MCP stdio and sshd (${backend})`, {timeout:60000}, async t=>{
   const fixture=await localSshd(t),root=fixture.root;
   const config=backend==='ssh2'?fixture.config:{...importOpenSsh(fixture.clientConfig).configs.fixture,allowedLocalPaths:[root],allowedRemotePaths:[root],pty:false};
   // Keep real remote job state within the disposable test directory.
@@ -27,7 +27,7 @@ for(const backend of ['ssh2','openssh']) test(`all 30 tools through real MCP std
   const echo=net.createServer(socket=>{socket.on('error',()=>{});socket.pipe(socket);});await new Promise(r=>echo.listen(0,'127.0.0.1',r));
   const roundtrip=port=>new Promise((resolve,reject)=>{const socket=net.connect(port,'127.0.0.1',()=>socket.write('mcp-forward'));socket.setTimeout(3000,()=>socket.destroy(new Error('timeout')));socket.on('error',reject);socket.once('data',data=>{socket.destroy();resolve(data.toString());});});
   try{
-    const definitions=await client.listTools();assert.equal(definitions.tools.length,30);
+    const definitions=await client.listTools();assert.equal(definitions.tools.length,31);
     assert.match(await invoke('ssh_server_list'),/fixture/);
     assert.match(await invoke('ssh_exec',{command:'printf "%s|%s" "$TEST_ENV" "$PWD"',env:{TEST_ENV:'中文 value'},cwd:root}),new RegExp('中文 value\\|'+root));
     assert.match(await invoke('ssh_exec',{command:'printf failed; exit 7'}),/\[exit code\] 7/);
@@ -84,11 +84,19 @@ for(const backend of ['ssh2','openssh']) test(`all 30 tools through real MCP std
     assert.match(await invoke('ssh_exec',{command:'printf after-reload'}),/after-reload/);
     await invoke('ssh_file_read',{remotePath:'/etc/passwd'},true);
     const cleanup=await json('ssh_session_log_cleanup',{maxAgeDays:0,dryRun:true});assert.equal(cleanup.dryRun,true);
+    assert.equal((await json('ssh_server_disconnect')).connected,false);
+    assert.match(await invoke('ssh_exec',{command:'printf after-disconnect'}),/after-disconnect/);
     assert.deepEqual([...called].sort(),definitions.tools.map(tool=>tool.name).sort());
   }finally{
     if(session)await invoke('ssh_session_stop',{sessionName:'audit'}).catch(()=>{});
     for(const forwardId of forwards)await invoke('ssh_forward_stop',{forwardId}).catch(()=>{});
     for(const jobId of jobs)await invoke('ssh_job_kill',{jobId}).catch(()=>{});
-    await client.close();await new Promise(r=>echo.close(r));
+    await client.close();
+    const services=path.join(root,'sessions','services');
+    if(fs.existsSync(services))for(const name of fs.readdirSync(services).filter(n=>n.endsWith('.json'))){
+      const service=JSON.parse(fs.readFileSync(path.join(services,name),'utf8'));
+      await fetch(new URL('/.well-known/ssh-agent-mcp',service.endpoint),{method:'DELETE',headers:{Authorization:'Bearer '+service.token}}).catch(()=>{});
+    }
+    await delay(150);await new Promise(r=>echo.close(r));
   }
 });

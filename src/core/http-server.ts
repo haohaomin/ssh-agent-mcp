@@ -99,8 +99,9 @@ export class McpHttpServer {
     private readonly createMcpServer: () => McpServer,
     manager?: SSHConnectionManager,
     uiPath?: string,
+    private readonly shared?: { id: string; stop: () => void },
   ) {
-    this.ui = manager && uiPath ? new WebUi(manager, uiPath) : undefined;
+    this.ui = manager && uiPath ? new WebUi(manager, uiPath, config.token) : undefined;
   }
 
   private readonly ui?: WebUi;
@@ -155,6 +156,7 @@ export class McpHttpServer {
       return;
     }
     this.closed = true;
+    this.ui?.close();
     if (!httpServer.listening) {
       return;
     }
@@ -211,7 +213,40 @@ export class McpHttpServer {
         return;
       }
 
+      if (this.shared && pathname === '/.well-known/ssh-agent-mcp') {
+        if (this.allowedHosts && !this.allowedHosts.includes(req.headers.host || '')) {
+          writeJson(res, 403, { error: 'Invalid Host header' }); return;
+        }
+        if (!this.authorized(req)) { writeJson(res, 401, { error: 'Unauthorized' }); return; }
+        if (req.headers.origin || req.headers['sec-fetch-site'] === 'cross-site') {
+          writeJson(res, 403, { error: 'Browser management requests are not allowed' }); return;
+        }
+        if (req.method === 'GET') { writeJson(res, 200, { id: this.shared.id }); return; }
+        if (req.method === 'DELETE') {
+          writeJson(res, 200, { stopped: true });
+          setTimeout(this.shared.stop, 50); return;
+        }
+        writeJson(res, 405, { error: 'Method not allowed' }); return;
+      }
+
       if (this.ui?.matches(pathname)) {
+        // UI routes bypass the MCP transport, so apply its host protection here too.
+        if (this.allowedHosts && !this.allowedHosts.includes(req.headers.host || "")) {
+          writeJson(res, 403, { error: "Invalid Host header" });
+          return;
+        }
+        if (this.ui.isApi(pathname)) {
+          let sameOrigin = !req.headers.origin;
+          try { sameOrigin ||= new URL(req.headers.origin!).host === req.headers.host; } catch {}
+          if (!sameOrigin || req.headers["sec-fetch-site"] === "cross-site") {
+            writeJson(res, 403, { error: "Cross-origin requests are not allowed" });
+            return;
+          }
+        }
+        if (pathname === this.config.path) {
+          writeJson(res, 400, { error: "UI path overlaps the MCP endpoint" });
+          return;
+        }
         // Static UI assets are harmless and must load so the browser can show
         // its token prompt. API calls remain protected by the HTTP bearer token.
         if (this.ui.isApi(pathname) && !this.authorized(req)) {

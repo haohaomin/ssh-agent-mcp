@@ -24,7 +24,12 @@ export class DurableSessions {
   constructor(private manager:SSHConnectionManager){}
   private meta(name:string):SessionMeta {const metadata=JSON.parse(fs.readFileSync(sessionPaths(name).meta,'utf8')) as SessionMeta;
     if(metadata.sessionName!==name||metadata.configHash!==configHash(this.manager.getConfig(metadata.connectionName)))throw new Error('Session connection configuration changed; restore the matching configuration to access this worker');return metadata;}
+  connectionName(name:string){return this.meta(name).connectionName || this.manager.getDefaultConnectionName();}
   async start(sessionName:string,connectionName?:string,ensure=false,options:any={}):Promise<any>{
+    const name = connectionName || this.manager.getDefaultConnectionName();
+    return this.manager.withSessionStart(name, () => this.startWithLock(sessionName, name, ensure, options));
+  }
+  private async startWithLock(sessionName:string,connectionName:string,ensure:boolean,options:any):Promise<any>{
     const paths=sessionPaths(sessionName);
     let lock:number;
     try{lock=fs.openSync(paths.lock,'wx',0o600);}catch(error){
@@ -45,7 +50,7 @@ export class DurableSessions {
     const paths=sessionPaths(sessionName);
     if(fs.existsSync(paths.meta)){
       const meta=this.meta(sessionName);
-      try {const info=await sessionRequest(meta,'info');if(!info.closed){if(!ensure)throw new Error('Session name already in use');if(meta.connectionName!==connectionName)throw new Error('Session belongs to another connection');return {...info,...meta,reused:true,observer:this.observe(meta,options.observerMode)};}
+      try {const info=await sessionRequest(meta,'info');if(!info.closed){if(!ensure)throw new Error('Session name already in use');if((meta.connectionName || this.manager.getDefaultConnectionName())!==connectionName)throw new Error('Session belongs to another connection');return {...info,...meta,reused:true,observer:this.observe(meta,options.observerMode)};}
         // A closed shell can leave its worker alive for log reads; retire it before reusing the name.
         await this.stop(sessionName);
       }

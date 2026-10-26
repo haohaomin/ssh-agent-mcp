@@ -17,7 +17,11 @@
     "docs:tools": "npm run build && node scripts/generate-tool-reference.js",
     "docs:build": "npm run docs:tools && node scripts/build-site.js",
     "docs:check": "node scripts/check-site.js",
-    "docs:serve": "node scripts/serve-site.js"
+    "docs:serve": "node scripts/serve-site.js",
+    "ui": "node build/index.js --ui --import-ssh-config",
+    "setup:codex": "node scripts/setup-codex.js",
+    "service:status": "node build/index.js service status",
+    "service:stop": "node build/index.js service stop"
   },
   "keywords": [
     "ssh",
@@ -44,6 +48,7 @@
   },
   "files": [
     "scripts/prepare-pty.js",
+    "scripts/setup-codex.js",
     "build/**/*",
     "LICENSES/**/*",
     "THIRD_PARTY.md",

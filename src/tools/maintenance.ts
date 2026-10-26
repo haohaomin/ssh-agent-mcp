@@ -43,44 +43,20 @@ export function registerMaintenanceTools(server: McpServer): void {
   const manager = SSHConnectionManager.getInstance();
   const sessions = new DurableSessions(manager);
 
+  server.registerTool("ssh_server_disconnect", {
+    description: "Disconnect one server (default if omitted), closing its SSH connection, durable terminals and port forwards. Remote background jobs continue. Automatic job polling pauses until an explicit SSH operation reconnects. Other servers are unaffected.",
+    inputSchema: { connectionName },
+  }, async ({ connectionName }) => {
+    try { return result(await manager.disconnectServer(connectionName)); }
+    catch (error) { return failure(error); }
+  });
+
   server.registerTool("ssh_server_diagnose", {
     description: "Diagnose one SSH connection without exposing credentials: backend, local dependencies, known_hosts, connection and SFTP probes.",
     inputSchema: { connectionName },
   }, async ({ connectionName }) => {
-    const started = Date.now();
-    try {
-      const config = manager.getConfig(connectionName);
-      const resolvedName = connectionName || manager.getDefaultConnectionName();
-      const backend = config.backend === "openssh" ? "openssh" : "ssh2";
-      const checks: Record<string, unknown> = {
-        local: {
-          backend,
-          hostKeyVerification: backend === 'openssh' ? 'native-ssh-policy' : config.knownHostsFile ? 'known-hosts' : 'not-configured',
-          ssh: backend === "openssh" ? localBinary("ssh") : undefined,
-          rsync: localBinary("rsync"),
-          knownHostsFile: config.knownHostsFile ? { path: config.knownHostsFile, exists: fs.existsSync(config.knownHostsFile) } : undefined,
-          nativeConfigFile: config.nativeConfigFile ? { path: config.nativeConfigFile, exists: fs.existsSync(config.nativeConfigFile) } : undefined,
-        },
-        target: { host: config.host, port: config.port, username: config.username },
-      };
-      const connectStarted = Date.now();
-      try {
-        await manager.connect(connectionName);
-        checks.connection = { ok: true, elapsedMs: Date.now() - connectStarted };
-      } catch (error) {
-        checks.connection = { ok: false, elapsedMs: Date.now() - connectStarted, error: safeError(error, config) };
-        checks.sftp = { ok: false, skipped: true, reason: "connection failed" };
-        return result({ connectionName: resolvedName, ok: false, elapsedMs: Date.now() - started, checks });
-      }
-      try {
-        const probe = await sftpProbe(manager, connectionName);
-        checks.sftp = { ok: true, probe };
-      } catch (error) {
-        checks.sftp = { ok: false, error: safeError(error, config) };
-      }
-      const ok = (checks.connection as { ok: boolean }).ok && (checks.sftp as { ok: boolean }).ok;
-      return result({ connectionName: resolvedName, ok, elapsedMs: Date.now() - started, checks });
-    } catch (error) { return failure(error); }
+    try { return result(await diagnoseConnection(manager, connectionName)); }
+    catch (error) { return failure(error); }
   });
 
   server.registerTool("ssh_config_reload", {
@@ -106,4 +82,40 @@ export function registerMaintenanceTools(server: McpServer): void {
     try { return result(await sessions.cleanup({ maxAgeDays, maxTotalBytes, dryRun })); }
     catch (error) { return failure(error); }
   });
+}
+
+export async function diagnoseConnection(manager: SSHConnectionManager, connectionName?: string) {
+  const started = Date.now();
+  const config = manager.getConfig(connectionName);
+  const resolvedName = connectionName || manager.getDefaultConnectionName();
+  const backend = config.backend === "openssh" ? "openssh" : "ssh2";
+  const checks: Record<string, unknown> = {
+    local: {
+      backend,
+      hostKeyVerification: backend === 'openssh' ? 'native-ssh-policy' : config.knownHostsFile ? 'known-hosts' : 'not-configured',
+      ssh: backend === "openssh" ? localBinary("ssh") : undefined,
+      rsync: localBinary("rsync"),
+      knownHostsFile: config.knownHostsFile ? { path: config.knownHostsFile, exists: fs.existsSync(config.knownHostsFile) } : undefined,
+      nativeConfigFile: config.nativeConfigFile ? { path: config.nativeConfigFile, exists: fs.existsSync(config.nativeConfigFile) } : undefined,
+    },
+    target: { host: config.host, port: config.port, username: config.username },
+  };
+  const connectStarted = Date.now();
+  try {
+    await manager.connect(connectionName);
+    checks.connection = { ok: true, elapsedMs: Date.now() - connectStarted };
+  } catch (error) {
+    checks.connection = { ok: false, elapsedMs: Date.now() - connectStarted, error: safeError(error, config) };
+    checks.sftp = { ok: false, skipped: true, reason: "connection failed" };
+    return { connectionName: resolvedName, ok: false, elapsedMs: Date.now() - started, checks };
+  }
+  try {
+    const probe = await sftpProbe(manager, connectionName);
+    checks.sftp = { ok: true, probe };
+  } catch (error) {
+    checks.sftp = { ok: false, error: safeError(error, config) };
+  }
+  const ok = (checks.connection as { ok: boolean }).ok && (checks.sftp as { ok: boolean }).ok;
+  return { connectionName: resolvedName, ok, elapsedMs: Date.now() - started, checks };
+
 }

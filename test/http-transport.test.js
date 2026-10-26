@@ -83,6 +83,7 @@ function startServer(extraArgs) {
     ...extraArgs,
   ], {
     stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, SSH_AGENT_STATE_DIR: path.join(tmpDir, 'state') },
   });
 
   return { child, tmpDir };
@@ -204,6 +205,25 @@ describe('MCP HTTP transport', () => {
     } finally {
       await stopServer(child, tmpDir);
     }
+  });
+
+  it('protects UI APIs from rebinding, cross-site requests and non-JSON mutations', async () => {
+    const { child, tmpDir } = startServer(['--ui']);
+    try {
+      const output = await waitForOutput(child.stderr, endpointPattern);
+      const endpoint = output.match(endpointPattern)[1];
+      const api = new URL('/ui/api/config/reload', endpoint);
+      assert.equal(await postWithHost(api, 'evil.example'), 403);
+      for (const headers of [{ origin: 'https://evil.example' }, { origin: 'null' }, { 'sec-fetch-site': 'cross-site' }]) {
+        const response = await fetch(api, { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: '{}' });
+        assert.equal(response.status, 403);
+      }
+      assert.equal((await fetch(api, { method: 'POST', headers: { 'content-type': 'text/plain' }, body: '{}' })).status, 400);
+      const valid = await fetch(api, { method: 'POST', headers: { origin: new URL(endpoint).origin, 'content-type': 'application/json' }, body: '{}' });
+      assert.equal(valid.status, 200);
+      const asset = await fetch(new URL('/ui', endpoint), { redirect: 'manual' });
+      assert.equal(asset.status, 308);
+    } finally { await stopServer(child, tmpDir); }
   });
 
   it('serves initialize and tools/list, and exits on SIGTERM', async () => {

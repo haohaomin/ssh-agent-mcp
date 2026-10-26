@@ -211,7 +211,7 @@ function createPasswordConfig(overrides = {}) {
 }
 
 function extractMarkerId(payload, prefix) {
-  const match = payload.match(new RegExp(`${prefix}(.+?)__`));
+  const match = payload.replace(/\\137/g, '_').match(new RegExp(`${prefix}(.+?)__`));
   return match?.[1];
 }
 
@@ -2410,6 +2410,7 @@ describe('SSH Connection Manager', () => {
 
     it('upload 目录：子目录不能通过 Windows 路径语义逃出远端白名单', { skip: process.platform === 'win32' }, async () => {
       const { sftp, tempDir } = setupMem({ allowedRemotePaths: ['C:/allowed'] });
+      sftp.realpath = (remote, callback) => callback(null, remote);
       const local = path.join(tempDir, 'tree');
       fs.mkdirSync(path.join(local, '..\\outside'), { recursive: true });
       try {

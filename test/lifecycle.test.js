@@ -92,7 +92,7 @@ function createPreConnectConfig(port) {
 }
 
 function spawnServer(configPath) {
-  const child = spawn(process.execPath, [entrypoint, '--config-file', configPath], {
+  const child = spawn(process.execPath, [entrypoint, '--standalone', '--config-file', configPath], {
     stdio: ['pipe', 'pipe', 'pipe'],
   });
 
@@ -173,7 +173,7 @@ describe('MCP server lifecycle', () => {
     const address = handshakeServer.address();
     assert.ok(address && typeof address !== 'string');
     const { tmpDir, configPath } = createPreConnectConfig(address.port);
-    const child = spawn(process.execPath, [entrypoint, '--config-file', configPath, '--pre-connect'], {
+    const child = spawn(process.execPath, [entrypoint, '--standalone', '--config-file', configPath, '--pre-connect'], {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 

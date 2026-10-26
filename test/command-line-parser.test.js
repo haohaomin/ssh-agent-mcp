@@ -51,6 +51,18 @@ Host testhost
     fs.rmSync(fixturesDir, { recursive: true, force: true });
   });
 
+  it('enables HTTP for UI, supports a custom path and rejects endpoint collisions', () => {
+    process.argv = ['node', 'test', '--config-file', testConfigPath, '--ui', '--ui-path', '/workbench/'];
+    const result = CommandLineParser.parseArgs();
+    assert.equal(result.mcpTransport, 'http'); assert.equal(result.uiPath, '/workbench');
+    for (const uiPath of ['/', '/mcp']) {
+      process.argv = ['node', 'test', '--config-file', testConfigPath, '--ui', '--ui-path', uiPath];
+      assert.throws(() => CommandLineParser.parseArgs(), /must not/);
+    }
+    process.argv = ['node', 'test', '--config-file', testConfigPath, '--ui', '--ui-path', '/api', '--http-path', '/api/mcp'];
+    assert.throws(() => CommandLineParser.parseArgs(), /must not/);
+  });
+
   describe('配置文件解析', () => {
     it('应该正确解析 JSON 配置文件（对象格式）', () => {
       process.argv = ['node', 'test', '--config-file', testConfigPath];

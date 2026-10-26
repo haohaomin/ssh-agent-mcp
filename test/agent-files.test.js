@@ -21,7 +21,7 @@ function setup(t) {
     ext_openssh_rename: fs.rename, unlink: fs.unlink,
     readdir(p, cb) { fs.readdir(p,{withFileTypes:true},(e,list) => cb(e,list?.map(entry => ({ filename:entry.name, attrs:fs.lstatSync(path.join(p,entry.name)) })))); }
   };
-  const manager = { withSftp: async (_name, f) => f(sftp), validateRemotePath(p) { if (!(p === root || p.startsWith(root + path.sep))) throw new Error('outside root'); return p; } };
+  const manager = { getDefaultConnectionName: () => 'fixture', withSftp: async (_name, f) => f(sftp), validateRemotePath(p) { if (!(p === root || p.startsWith(root + path.sep))) throw new Error('outside root'); return p; } };
   return { root, files:new RemoteFiles(manager), sftp };
 }
 test('create exclusive, view lines, atomic edits and file permissions', async t => {

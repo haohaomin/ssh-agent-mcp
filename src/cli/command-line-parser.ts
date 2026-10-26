@@ -193,6 +193,8 @@ export class CommandLineParser {
         "http-token": { type: "string" },
         ui: { type: "boolean" },
         "ui-path": { type: "string" },
+        standalone: { type: "boolean" },
+        "no-open": { type: "boolean" },
       },
       allowPositionals: true,
     });
@@ -543,6 +545,10 @@ export class CommandLineParser {
 
     const ui = values.ui === true;
     const uiPath = this.parseHttpPath(values["ui-path"] ?? "/ui");
+    const httpPath = this.parseHttpPath(values["http-path"]);
+    if (ui && (uiPath === "/" || httpPath === uiPath || httpPath.startsWith(`${uiPath}/`))) {
+      throw new Error("--ui-path must not be / or contain the MCP HTTP endpoint");
+    }
     return {
       configs: configMap,
       preConnect: values["pre-connect"] === true,
@@ -550,7 +556,7 @@ export class CommandLineParser {
       http: {
         host: this.parseHttpHost(values["http-host"]),
         port: this.parseHttpPort(values["http-port"]),
-        path: this.parseHttpPath(values["http-path"]),
+        path: httpPath,
         token: this.parseHttpToken(values["http-token"]),
       },
       ui,

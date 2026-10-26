@@ -10,7 +10,7 @@ test('unified stdio client discovers all tool families from imported config', {t
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'ssh-agent-stdio-')), file=path.join(dir,'config');
   fs.writeFileSync(file,'Host fixture\n HostName 127.0.0.1\n User test\n');
   t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
-  const transport=new StdioClientTransport({command:process.execPath,args:['build/index.js','--import-ssh-config','--ssh-config-file',file],stderr:'pipe'});
+  const transport=new StdioClientTransport({command:process.execPath,args:['build/index.js','--standalone','--import-ssh-config','--ssh-config-file',file],stderr:'pipe'});
   const client=new Client({name:'unified-test',version:'1'});t.after(()=>client.close());await client.connect(transport);
   const {tools}=await client.listTools(); const names=tools.map(t=>t.name);
   for(const name of ['ssh_exec','ssh_upload','ssh_download','ssh_file_edit','ssh_file_grep','ssh_file_glob','ssh_sync','ssh_session_ensure','ssh_job_start','ssh_forward_start','ssh_forward_reverse']) assert.ok(names.includes(name),name);

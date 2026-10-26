@@ -1,3 +1,5 @@
+import { DurableSessions } from "./durable-sessions.js";
+import type { ActivityMonitor } from "./activity-monitor.js";
 import { OpenSshClient } from './openssh-client.js';
 import { InteractiveService } from "./interactive.js";
 import { knownHostVerifier } from "../utils/host-verifier.js";
@@ -240,11 +242,15 @@ function isAuthMethodAllowedByServer(
  * SSH Connection Manager class
  */
 export class SSHConnectionManager {
+  public activity?: ActivityMonitor;
   private static instance: SSHConnectionManager;
   private clients: Map<string, Client> = new Map();
   private configs: SshConnectionConfigMap = {};
   private connected: Map<string, boolean> = new Map();
   private statusCache: Map<string, ServerStatus> = new Map();
+  private manuallyDisconnected = new Set<string>();
+  private disconnecting = new Set<string>();
+  private startingSessions = new Map<string, number>();
   private pendingConnections: Map<string, Promise<void>> = new Map();
   private pendingStatusCollections: Map<string, NodeJS.Timeout> = new Map();
   private commandWhitelistRegexes: Map<string, RegExp[]> = new Map();
@@ -406,6 +412,8 @@ export class SSHConnectionManager {
    */
   public async connect(name?: string): Promise<void> {
     const key = name || this.defaultName;
+    if (this.disconnecting.has(key)) throw new Error("Connection is disconnecting; retry shortly");
+    this.manuallyDisconnected.delete(key);
     if (this.hasUsableConnection(key)) {
       return;
     }
@@ -584,6 +592,29 @@ export class SSHConnectionManager {
     return this.runCommandInternal(cmdString, directory, name, options);
   }
 
+  /** Resolve existing targets and new destinations before restricted SFTP access. */
+  public async resolveRemotePath(sftp: SFTPWrapper, remotePath: string, name?: string, creating = false): Promise<string> {
+    const requested = this.validateRemotePath(remotePath, name);
+    const config = this.getConfig(name);
+    if (!config.allowedRemotePaths?.length) return requested;
+    const missing = (error: unknown) => [2, 'ENOENT'].includes((error as {code: number | string}).code);
+    const resolve = async (candidate: string, depth = 0): Promise<string> => {
+      if (depth > 64) throw new ToolError('REMOTE_PATH_NOT_ALLOWED', 'Remote path has too many missing parents', false);
+      try { return await new Promise<string>((yes, no) => sftp.realpath(candidate, (error, value) => error ? no(error) : yes(value))); }
+      catch (error) {
+        if (!creating || !missing(error)) throw error;
+        // A dangling symlink must not be treated as a new regular file.
+        const info = await new Promise<Stats | undefined>((yes, no) => sftp.lstat(candidate, (err, value) => err ? missing(err) ? yes(undefined) : no(err) : yes(value)));
+        if (info) throw new ToolError('REMOTE_PATH_NOT_ALLOWED', 'Cannot safely resolve remote destination', false);
+        const parent = path.posix.dirname(candidate);
+        if (parent === candidate) throw error;
+        return path.posix.join(await resolve(parent, depth + 1), path.posix.basename(candidate));
+      }
+    };
+    const resolved = await this.withTimeout(resolve(requested), this.getSftpTimeoutMs(config), () => this.invalidateConnection(name || this.defaultName), 'SFTP path resolution timed out');
+    return this.validateRemotePath(resolved, name);
+  }
+
   /**
    * Upload file
    */
@@ -747,7 +778,7 @@ export class SSHConnectionManager {
     }
 
     const validatedLocalPath = this.validateLocalPath(localPath, name, "read");
-    const validatedRemotePath = this.validateRemotePath(remotePath, name);
+    let validatedRemotePath = this.validateRemotePath(remotePath, name);
 
     const localStats = await fs.promises
       .stat(validatedLocalPath)
@@ -766,6 +797,7 @@ export class SSHConnectionManager {
     );
 
     try {
+      validatedRemotePath = await this.resolveRemotePath(sftp, validatedRemotePath, name, true);
       const localSize = await this.getLocalSizeForFastTransfer(
         validatedLocalPath,
       );
@@ -805,7 +837,7 @@ export class SSHConnectionManager {
       }
       return "File uploaded successfully";
     } catch (error) {
-      if (error instanceof ToolError && error.code === "OPERATION_TIMEOUT") {
+      if (error instanceof ToolError) {
         throw error;
       }
       if (this.errorPathMatches(error, validatedLocalPath)) {
@@ -844,7 +876,7 @@ export class SSHConnectionManager {
     }
 
     const validatedLocalPath = this.validateLocalPath(localPath, name, "write");
-    const validatedRemotePath = this.validateRemotePath(remotePath, name);
+    let validatedRemotePath = this.validateRemotePath(remotePath, name);
     const client = await this.ensureConnected(name);
     const sftpTimeoutMs = this.getSftpTimeoutMs(config);
     const sftp = await this.withTimeout(
@@ -858,6 +890,7 @@ export class SSHConnectionManager {
       .slice(2)}`;
 
     try {
+      validatedRemotePath = await this.resolveRemotePath(sftp, validatedRemotePath, name, false);
       const remoteStats = await this.statRemote(sftp, validatedRemotePath).catch(
         () => undefined,
       );
@@ -984,12 +1017,13 @@ export class SSHConnectionManager {
     options: { offset?: number; length?: number } = {},
     name?: string,
   ): Promise<string> {
-    const validatedRemotePath = this.validateRemotePath(remotePath, name);
+    let validatedRemotePath = this.validateRemotePath(remotePath, name);
     const { sftp, key, timeoutMs } = await this.openSftpFor(name);
     const offset = options.offset ?? 0;
     const length = options.length ?? DEFAULT_READ_FILE_BYTES;
 
     try {
+      validatedRemotePath = await this.resolveRemotePath(sftp, validatedRemotePath, name, false);
       const stats = await this.withTimeout(
         this.statRemote(sftp, validatedRemotePath),
         timeoutMs,
@@ -1064,11 +1098,12 @@ export class SSHConnectionManager {
     options: { append?: boolean; mode?: number } = {},
     name?: string,
   ): Promise<string> {
-    const validatedRemotePath = this.validateRemotePath(remotePath, name);
+    let validatedRemotePath = this.validateRemotePath(remotePath, name);
     const { sftp, key, timeoutMs } = await this.openSftpFor(name);
     const data = Buffer.from(content, "utf8");
 
     try {
+      validatedRemotePath = await this.resolveRemotePath(sftp, validatedRemotePath, name, true);
       await this.withTimeout(
         pipeline(
           Readable.from([data]),
@@ -1164,7 +1199,7 @@ export class SSHConnectionManager {
     const { sftp, key, timeoutMs } = await this.openSftpFor(name);
     try {
       for (const dir of dirs) {
-        const validatedDir = this.validateRemotePath(dir, name);
+        const validatedDir = await this.resolveRemotePath(sftp, dir, name, true);
         await this.withTimeout(
           this.mkdirRemote(sftp, validatedDir),
           timeoutMs,
@@ -1218,6 +1253,7 @@ export class SSHConnectionManager {
     const timeoutMs = this.getSftpTimeoutMs(this.getConfig(name));
 
     const walk = async (remote: string, local: string): Promise<void> => {
+      remote = await this.resolveRemotePath(sftp, remote, name);
       const entries = await this.withTimeout(
         this.readdirRemote(sftp, remote),
         timeoutMs,
@@ -1488,8 +1524,57 @@ export class SSHConnectionManager {
   /**
    * Disconnect SSH connection
    */
+  public async reconnect(name?: string): Promise<void> {
+    const key = name || this.defaultName;
+    this.getConfig(key);
+    if (this.pendingConnections.has(key)) throw new Error("Connection is opening; retry when it settles");
+    this.invalidateConnection(key);
+    await this.connect(key);
+  }
+
+  public isManuallyDisconnected(name?: string): boolean {
+    return this.manuallyDisconnected.has(name || this.defaultName);
+  }
+
+  public async withSessionStart<T>(name: string, work: () => Promise<T>): Promise<T> {
+    if (this.disconnecting.has(name)) throw new Error("Connection is disconnecting; retry shortly");
+    this.startingSessions.set(name, (this.startingSessions.get(name) || 0) + 1);
+    try { return await work(); }
+    finally {
+      const remaining = (this.startingSessions.get(name) || 1) - 1;
+      if (remaining) this.startingSessions.set(name, remaining);
+      else this.startingSessions.delete(name);
+    }
+  }
+
+  /** Close this host's shared transport and detached terminals without killing jobs. */
+  public async disconnectServer(name?: string) {
+    const key = name || this.defaultName;
+    this.getConfig(key);
+    if (this.disconnecting.has(key) || this.pendingConnections.has(key) || this.startingSessions.has(key)) {
+      throw new Error("Connection or terminal is changing; retry when it settles");
+    }
+    this.disconnecting.add(key);
+    this.manuallyDisconnected.add(key);
+    try {
+      const stoppedForwards = this.interactive.listForwards()
+        .filter(f => (f.connectionName || this.defaultName) === key)
+        .map(f => { this.interactive.stopForward(f.forwardId); return f.forwardId; });
+      this.invalidateConnection(key);
+      this.statusCache.delete(key);
+      const sessions = new DurableSessions(this);
+      const owned = (await sessions.list()).filter(s => (s.connectionName || this.defaultName) === key && !s.closed);
+      const results = await Promise.allSettled(owned.map(s => sessions.stop(s.sessionName)));
+      const failed = owned.filter((_, i) => results[i].status === 'rejected').map(s => s.sessionName);
+      if (failed.length) throw new Error(`SSH connection closed, but terminal cleanup failed: ${failed.join(', ')}`);
+      return { connectionName: key, connected: false, stoppedSessions: owned.map(s => s.sessionName), stoppedForwards,
+        remoteJobsPreserved: true, message: "Disconnected. Remote jobs continue; automatic job polling is paused. Explicit SSH operations reconnect automatically." };
+    } finally { this.disconnecting.delete(key); }
+  }
+
   public disconnect(): void {
     this.interactive.close();
+    this.manuallyDisconnected.clear();
     for (const timeoutId of this.pendingStatusCollections.values()) {
       clearTimeout(timeoutId);
     }
@@ -2275,6 +2360,7 @@ export class SSHConnectionManager {
     }
 
     const maxOutputBytes = this.getMaxOutputBytes(config);
+    const reportOutput = this.activity?.log.outputReporter();
 
     return new Promise<string>((resolve, reject) => {
       let openTimeoutId: NodeJS.Timeout | undefined;
@@ -2383,6 +2469,7 @@ export class SSHConnectionManager {
             } else {
               data += stdoutDecoder.write(chunk);
             }
+            reportOutput?.(this.formatCommandSuccess(data, errorData));
           };
 
           stream.on("data", (chunk: Buffer) => appendChunk(chunk, false));
@@ -2698,6 +2785,8 @@ export class SSHConnectionManager {
     // be echoed back and waitForShellReady would resolve prematurely, before
     // stty runs — leaving the next real command echoed.
     stream.write("export PS1=''\n");
+    // Zsh's line editor redraws input independently of the terminal ECHO flag.
+    stream.write('if [ -n "${ZSH_VERSION-}" ]; then unsetopt zle prompt_cr prompt_sp; fi\n');
     stream.write("stty -echo >/dev/null 2>&1 || true\n");
 
     const verifyId = this.generateMarkerId("stty");
@@ -2758,6 +2847,7 @@ export class SSHConnectionManager {
     const script = this.buildShellCommandScript(commandId, cmdString, directory, config.commandTemplate);
 
     const maxOutputBytes = this.getMaxOutputBytes(config);
+    const reportOutput = this.activity?.log.outputReporter();
 
     return new Promise<string>((resolve, reject) => {
       let settled = false;
@@ -2822,6 +2912,7 @@ export class SSHConnectionManager {
         }
 
         if (!matched) {
+          if (scanState.outputStartIndex >= 0) reportOutput?.(this.cleanShellOutput((this.shellBuffers.get(key) || '').slice(scanState.outputStartIndex).replace(/__MCP_END__[\s\S]*$/, '')));
           return;
         }
 
@@ -2898,8 +2989,9 @@ export class SSHConnectionManager {
     directory?: string,
     commandTemplate?: string,
   ): string {
-    const beginMarker = `__MCP_BEGIN__${commandId}__`;
-    const endMarker = `__MCP_END__${commandId}__RC__`;
+    // Echoed command text must never contain a literal framing marker.
+    const beginMarker = `__MCP_BEGIN__${commandId}__`.replace(/_/g, '\\137');
+    const endMarker = `__MCP_END__${commandId}__RC__`.replace(/_/g, '\\137');
     let commandBody = directory
       ? `cd -- ${shellQuote(directory)} && { ${cmdString}; }`
       : `{ ${cmdString}; }`;
