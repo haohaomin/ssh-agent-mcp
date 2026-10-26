@@ -1,40 +1,92 @@
+<!doctype html>
+<html lang="zh-CN">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SSH Workbench</title>
 <link rel="stylesheet" href="styles.css">
 <link rel="icon" href="favicon.svg">
-<div id="app" aria-live="polite">
+<div id="app">
   <aside class="sidebar">
-    <div class="brand"><span class="brand-mark">›_</span><span>ssh-agent</span></div>
+    <div class="brand"><span class="brand-mark">›_</span><span>ssh-agent<small>SSH WORKSPACE</small></span></div>
     <nav class="nav" aria-label="工作区">
       <button data-view="overview">⌂ <span>概览</span></button>
+      <button data-view="activity">≡ <span>操作记录</span></button>
       <button data-view="terminal">›_ <span>终端会话</span></button>
       <button data-view="files">□ <span>文件管理</span></button>
       <button data-view="tasks">☷ <span>后台任务</span></button>
       <button data-view="forwards">↔ <span>端口转发</span></button>
     </nav>
-    <div class="side-label">当前服务器</div>
-    <div id="servers" class="servers"></div>
-    <button id="import-config" class="outline full">↓ 导入 SSH 配置</button>
-    <div class="side-source">来源：~/.ssh/config</div>
+    <details class="server-section" open>
+      <summary class="side-label">服务器 <span id="side-server-count"></span></summary>
+      <div class="server-browser">
+        <label class="server-search-field">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg>
+          <input id="server-search" type="search" placeholder="查找服务器" aria-label="查找服务器">
+        </label>
+        <div id="servers" class="servers" role="group" aria-label="服务器列表"></div>
+        <p id="server-no-match" class="muted" hidden>没有匹配的服务器</p>
+      </div>
+    </details><div class="sidebar-foot">
+    <button id="import-config" class="outline full">↻ 重新读取配置</button>
+    <div class="side-source"><i class="dot connected"></i> 本机共享服务</div></div>
   </aside>
   <main class="main">
-    <header class="page-head"><h1 id="page-title">概览</h1><span>本机工作台</span></header>
+    <form id="auth-form" class="auth-form panel" hidden>
+      <div><strong>重新连接本机服务</strong><p class="muted">运行 npm run ui 可自动重新打开工作台，也可输入访问令牌。</p></div>
+      <label>访问令牌 <input id="auth-token" type="password" required autocomplete="off"></label><button class="primary" type="submit">连接</button>
+    </form>
+    <header class="page-head"><div><span class="page-eyebrow">工作空间 / SSH</span><h1 id="page-title">概览</h1></div><span class="workspace-label">LOCAL WORKSPACE</span></header>
     <section id="host-bar" class="host-bar" hidden>
       <div><div class="host-name"><strong id="host-name"></strong><span id="env-tag" class="tag"></span></div><div id="host-address" class="muted"></div></div>
-      <div class="connection"><i id="connection-dot"></i><span id="connection-label">已连接</span><button id="connection-details" class="outline">连接详情</button></div>
+      <div class="connection"><i id="connection-dot"></i><span id="connection-label">未连接</span><button id="connect" class="outline">连接</button><button id="disconnect" hidden class="outline" title="关闭当前服务器的终端和转发，后台任务继续运行">断开连接</button><button id="connection-details" class="outline">连接详情</button></div>
     </section>
-    <aside id="details" class="details" hidden><div class="details-head"><strong>连接详情</strong><button id="close-details" class="icon-button">×</button></div><dl><dt>配置来源</dt><dd>~/.ssh/config</dd><dt>连接方式</dt><dd>自动选择 · SSH Agent</dd><dt>状态</dt><dd id="detail-status"></dd></dl><div class="actions"><button id="diagnose" class="outline">运行诊断</button><button id="reconnect" class="primary">重新连接</button></div><p id="diagnosis" class="muted"></p></aside>
+    <aside id="details" class="details" hidden><div class="details-head"><strong>连接详情</strong><button id="close-details" class="icon-button">×</button></div><dl><dt>配置来源</dt><dd id="detail-source"></dd><dt>连接方式</dt><dd id="detail-backend"></dd><dt>状态</dt><dd id="detail-status"></dd></dl><div class="actions"><button id="diagnose" class="outline">运行诊断</button><button id="reconnect" class="primary">重新连接</button></div><p class="muted">断开连接会关闭此服务器的终端和转发，远端后台任务继续运行。再次执行 SSH 操作会自动连接。</p><p id="diagnosis" class="muted"></p></aside>
     <section id="view-overview" class="view">
-      <div class="cards"><article class="card"><span class="eyebrow">你的服务器</span><strong id="server-count">—</strong><span class="card-foot" id="connected-count">—</span></article><article class="card"><h2>从本机配置开始</h2><p>读取已有的 SSH 配置，统一管理连接、终端和远端文件。</p><button id="import-main" class="primary">导入 SSH 配置</button></article></div>
+      <div class="cards"><article class="card"><span class="eyebrow">你的服务器</span><strong id="server-count">—</strong><span class="card-foot" id="connected-count">—</span></article><article class="card"><h2>从本机配置开始</h2><p>读取已有的 SSH 配置，统一管理连接、终端和远端文件。</p><button id="import-main" class="primary">重新读取配置</button></article></div>
       <div class="section-head"><h2>继续工作</h2><span class="muted">最近会话</span></div><article class="session-row"><span class="session-icon">›_</span><div><strong>SSH 会话</strong><small>选择服务器后查看持久终端</small></div><button data-view="terminal" class="outline">打开终端</button></article>
     </section>
-    <section id="view-terminal" class="view" hidden><div class="panel"><div class="session-tabs" id="session-tabs"></div><button id="new-session" class="outline">＋ 新建</button></div><div class="panel session-tools"><span id="session-description" class="muted">持久会话</span><div class="actions"><span id="session-mode" class="blue">观察中</span><button id="rename-session" class="outline">重命名</button><button id="takeover" class="outline">接管输入</button></div></div><div id="rename-row" class="rename-row" hidden><label>会话名称 <input id="session-name" maxlength="40"></label><button id="save-name" class="outline">保存</button></div><div class="terminal panel"><pre id="terminal-output"></pre><div class="prompt"><span>$</span><input id="command" aria-label="终端命令" placeholder="只读观察中" disabled></div><pre id="command-output"></pre></div><div class="panel-foot"><span id="input-owner">输入权：AI · 你正在观察</span><span>会话持续运行</span></div></section>
-    <section id="view-files" class="view" hidden><div class="panel file-toolbar"><span id="file-path">/srv/app</span><div class="actions"><button id="refresh-files" class="outline">刷新</button><button id="upload-file" class="outline">上传</button></div></div><div class="file-layout panel"><div id="file-list" class="file-list"></div><div class="editor"><div class="editor-head"><strong id="file-name">选择文件</strong><span id="edit-state" class="muted">—</span></div><textarea id="file-content" spellcheck="false" aria-label="文件内容" disabled></textarea></div></div><div id="file-actions" class="panel-foot" hidden><span class="muted">修改后先预览差异，再写入远端</span><button id="preview-file" class="primary">预览修改</button></div><div id="file-preview" class="panel" hidden><div class="editor-head"><strong>确认文件修改</strong><button id="back-edit" class="outline">返回编辑</button></div><div class="diff"><div><small>修改前</small><pre id="before-file"></pre></div><div><small>修改后</small><pre id="after-file"></pre></div></div><div class="panel-foot"><label><input id="backup-file" type="checkbox" checked> 写入前备份原文件</label><button id="apply-file" class="primary">确认写入</button></div></div></section>
-    <section id="view-tasks" class="view" hidden><div class="panel section-head"><h2>后台任务</h2><span class="muted">关闭页面后继续执行</span></div><article id="task-list" class="task-row panel"><span class="muted">正在读取任务…</span></article></section>
-    <section id="view-forwards" class="view" hidden><div class="panel section-head"><h2>端口转发</h2><span class="muted">仅绑定本机回环地址</span></div><article id="forward-list" class="task-row panel"><span class="muted">正在读取转发…</span></article></section>
+    <section id="view-activity" class="view" hidden>
+      <div class="activity-intro"><p>跟随每一次执行，查看结果与变化。</p><div class="activity-live-tools"><span id="activity-live" role="status">正在连接…</span><button id="activity-pause" class="outline">暂停显示</button></div></div>
+      <div class="activity-stats" aria-label="记录概况">
+        <button data-activity-metric="all" aria-pressed="true"><span>全部操作</span><strong id="metric-all">0</strong></button>
+        <button data-activity-metric="running" aria-pressed="false"><span><i class="dot connected"></i> 进行中</span><strong id="metric-running">0</strong></button>
+        <button data-activity-metric="changes" aria-pressed="false"><span>文件修改</span><strong id="metric-changes">0</strong></button>
+        <button data-activity-metric="failed" aria-pressed="false"><span>需要关注</span><strong id="metric-failed">0</strong></button>
+      </div>
+      <div class="activity-toolbar">
+        <label class="activity-search-wrap"><span aria-hidden="true">⌕</span><input id="activity-search" type="search" aria-label="搜索操作" placeholder="搜索命令、文件或结果…"><kbd>/</kbd></label>
+        <select id="activity-host" aria-label="筛选服务器"><option value="">全部服务器</option></select>
+        <select id="activity-source" aria-label="筛选来源"><option value="">全部来源</option><option value="mcp">AI / MCP</option><option value="web">网页操作</option><option value="monitor">状态跟踪</option></select>
+        <select id="activity-status" aria-label="筛选状态"><option value="">全部状态</option><option value="running">进行中</option><option value="succeeded">已完成</option><option value="failed">失败</option><option value="interrupted">跟踪中断</option></select>
+      </div>
+      <div class="activity-list-caption"><span id="activity-counts"></span><button id="activity-reset" class="text-button" hidden>清除筛选</button><span>最新 200 条 · 本机保存</span></div>
+      <p id="activity-storage" class="notice" hidden></p>
+      <div class="activity-workspace">
+        <div class="activity-feed"><div id="activity-list" class="activity-list" aria-label="操作列表"></div><div id="activity-empty"><span class="empty-symbol" aria-hidden="true">›_</span><h2>等待第一条操作</h2><p>让 AI 使用 SSH 工具执行操作，进展会出现在这里。</p></div></div>
+        <article id="activity-inspector" class="activity-inspector" aria-label="操作详情">
+          <button id="activity-back" class="text-button">← 返回操作列表</button>
+          <div id="activity-detail-empty"><span class="empty-symbol" aria-hidden="true">≡</span><h2>执行过程，清晰可见</h2><p>选择一条操作，查看执行结果、文件差异与调用参数。</p></div>
+          <div id="activity-detail" hidden>
+            <div class="inspector-heading"><div><span id="detail-operation-kind" class="eyebrow"></span><h2 id="activity-detail-title"></h2></div><span id="activity-detail-status" class="status-pill"></span></div>
+            <p id="activity-detail-summary"></p>
+            <dl class="activity-facts"><div><dt>服务器</dt><dd id="activity-detail-host"></dd></div><div><dt>来源</dt><dd id="activity-detail-source"></dd></div><div><dt>开始时间</dt><dd id="activity-detail-time"></dd></div><div><dt>耗时</dt><dd id="activity-detail-duration"></dd></div></dl>
+            <div class="activity-detail-tabs" role="tablist" aria-label="详情内容"><button id="activity-tab-result" data-detail-tab="result" role="tab" aria-controls="activity-detail-content" aria-selected="true">执行结果</button><button id="activity-tab-diff" data-detail-tab="diff" role="tab" aria-controls="activity-detail-content" aria-selected="false">文件差异</button><button id="activity-tab-input" data-detail-tab="input" role="tab" aria-controls="activity-detail-content" aria-selected="false">调用参数</button></div>
+            <div class="detail-content-head"><span id="activity-content-label"></span><button id="activity-copy" class="text-button">复制内容</button></div>
+            <div id="activity-detail-content" role="tabpanel" aria-labelledby="activity-tab-result" tabindex="0"></div>
+            <p id="activity-detail-note" class="muted"></p>
+            <details class="activity-technical"><summary>技术信息</summary><code id="activity-detail-technical"></code></details>
+          </div>
+        </article>
+      </div>
+    </section>
+    <section id="view-terminal" class="view" hidden><div class="panel"><div class="session-tabs" id="session-tabs"></div><button id="new-session" class="outline">＋ 新建</button></div><div class="panel session-tools"><span id="session-description" class="muted">持久会话</span><div class="actions"><span id="session-mode" class="muted">未创建会话</span><button id="rename-session" class="outline">显示名称</button><button id="takeover" class="outline">启用输入</button><button id="stop-session" class="outline">停止会话</button></div></div><div id="rename-row" class="rename-row" hidden><label>显示名称 <input id="session-name" maxlength="40"></label><button id="save-name" class="outline">保存</button></div><div class="terminal panel"><pre id="terminal-output"></pre><div class="prompt"><span>$</span><input id="command" aria-label="终端命令" placeholder="请先新建会话" disabled></div><pre id="command-output"></pre></div><div class="panel-foot"><span id="input-owner">新建会话后可查看输出和发送命令</span><span>持久会话 · 多客户端共享</span></div></section>
+    <section id="view-files" class="view" hidden><div class="panel file-toolbar"><input id="directory-input" aria-label="目录路径" value="."><span id="file-path" hidden>.</span><div class="actions"><button id="parent-directory" class="outline">上级</button><button id="refresh-files" class="outline">刷新</button><button id="upload-file" class="outline">上传</button></div></div><div class="file-layout panel"><div id="file-list" class="file-list"></div><div class="editor"><div class="editor-head"><strong id="file-name">选择文件</strong><span id="edit-state" class="muted">—</span></div><textarea id="file-content" spellcheck="false" aria-label="文件内容" disabled></textarea></div></div><div class="panel-foot"><span id="backup-path" class="muted"></span><button id="restore-file" class="outline" hidden>恢复上次备份</button></div><div id="file-actions" class="panel-foot" hidden><span class="muted">修改后先预览差异，再写入远端</span><button id="preview-file" class="primary">预览修改</button></div><div id="file-preview" class="panel" hidden><div class="editor-head"><strong>确认文件修改</strong><button id="back-edit" class="outline">返回编辑</button></div><div class="diff"><div><small>修改前</small><pre id="before-file"></pre></div><div><small>修改后</small><pre id="after-file"></pre></div></div><div class="panel-foot"><label><input id="backup-file" type="checkbox" checked> 写入前备份原文件</label><button id="apply-file" class="primary">确认写入</button></div></div></section>
+    <section id="view-tasks" class="view" hidden><div class="panel section-head"><h2>后台任务</h2><button id="refresh-tasks" class="outline">刷新任务</button></div><article id="task-list" class="task-row panel"><span class="muted">正在读取任务…</span></article></section>
+    <section id="view-forwards" class="view" hidden><div class="panel section-head"><h2>端口转发</h2><button id="refresh-forwards" class="outline">刷新转发</button></div><article id="forward-list" class="task-row panel"><span class="muted">正在读取转发…</span></article></section>
     <div id="notice" class="notice" hidden role="status"></div>
   </main>
 </div>
 <input id="upload-input" type="file" hidden>
 <script type="module" src="app.js"></script>
+
+</html>
