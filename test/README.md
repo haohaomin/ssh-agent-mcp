@@ -1,12 +1,18 @@
 # 测试文档
 
-本项目使用 Node.js 内置的测试框架进行单元测试和集成测试。当前共 301 项，最近完整结果见 [测试报告](../docs/TEST_REPORT.md)。
+本项目使用 Node.js 内置的测试框架进行单元测试和集成测试。当前共 394 项，最近完整结果见 [测试报告](../docs/TEST_REPORT.md)。
 
 实际 SSH 集成测试需要本机 `ssh`、`ssh-keygen`、`rsync` 和 sshd（默认 `/usr/sbin/sshd`，可用 `SSH_AGENT_TEST_SSHD` 指定）。测试创建临时密钥与仅监听 loopback 的临时服务器，不连接个人配置中的服务器。真实 sshd 测试要求账户可以使用公钥登录该本机测试服务。
 
 新增的主要集成测试：
 
-- `mcp-live-tools.test.js`：分别通过 ssh2/OpenSSH，从真实 MCP stdio 客户端调用全部 30 个工具；含超时、中文、二进制目录传输、rsync/SFTP、持久终端、任务、转发、连接诊断、配置热加载和日志清理。后台任务 HOME 被限定到临时目录。
+- `mcp-regressions.test.js`：两种后端真实 MCP HTTP 请求的并发编辑、默认连接终端复用、符号链接路径边界、上传/下载和转发停止记录归属。
+
+- `activity-log.test.js` / `activity-live.test.js`：并发记录隔离、凭据脱敏、历史保留与重启、磁盘错误，以及两种 SSH 后端经真实 MCP HTTP 调用的 SSE 输出、文件差异、后台任务/终端自动跟踪和鉴权。
+
+- `web-ui-live.test.js`：两种后端的真实 HTTP 工作流，包含连接/诊断/重连、完整文本读取、哈希校验、空文件编辑、备份恢复、上传、持久会话、任务和转发；配合 HTTP 与 CLI 回归验证鉴权、跨站防护和 UI 路由。
+
+- `mcp-live-tools.test.js`：分别通过 ssh2/OpenSSH，从真实 MCP stdio 客户端调用全部 31 个工具；含超时、中文、二进制目录传输、rsync/SFTP、持久终端、任务、转发、连接诊断、配置热加载和日志清理。后台任务 HOME 被限定到临时目录。
 - `full-features-live.test.js`：证书认证、ProxyCommand/Match、块级差分、父进程退出后的终端恢复。
 - `auth-live-audit.test.js`：两种后端的加密私钥认证与错误主机公钥拒绝。
 - `audit-regressions.test.js`：通道进程回收、终端重开与反向转发断线清理。
@@ -202,3 +208,13 @@ it.only('只运行这个测试', () => {
 2. 新功能有对应的测试
 3. 测试覆盖了正常情况和边界情况
 4. 代码编译通过：`npm run build`
+
+- `shared-service.test.js`：真实 stdio 客户端并发接入、端口避让、共同活动记录、进程存活、配置隔离、崩溃恢复、不重放失败操作与鉴权停止。
+- `setup-codex.test.js`：一键注册、原配置保留、幂等与同名无关配置保护。
+
+- `disconnect.test.js`：ssh2/OpenSSH 的 MCP 与网页断开、跨服务器隔离、终端/转发清理、后台任务保留、暂停自动重连和并发启动保护。
+
+- `activity-monitor-offline.test.js`：重建监视器后，离线历史任务等待显式连接再查询。
+- `browser/workbench-races.js`：独立运行的真实浏览器回归，覆盖切换目标时清空未发送命令，以及延迟文件读取/恢复保留草稿；执行方式见 `browser/README.md`。
+
+- `forward-lifecycle.test.js`：转发创建期间关闭/断线、迟到端口分配回收、反向转发超时，以及并发创建的数量限制和名额释放。

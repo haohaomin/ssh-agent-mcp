@@ -72,7 +72,7 @@ node build/index.js --config-file servers.json
 
 也可将 `--config-file` 与 `--import-ssh-config` 一起使用，同名 JSON 连接覆盖导入结果。建议显式配置提供 `knownHostsFile`；不配置时，显式 ssh2 连接沿用原 TypeScript 项目未强制校验主机密钥的行为。
 
-`allowedLocalPaths` 与 `allowedRemotePaths` 控制文件访问范围。命令规则使用 `commandWhitelist` / `commandBlacklist`。任意交互 shell 与 rsync 不能在配置了命令过滤的连接上使用；文件操作可使用 SFTP。SSH 账户本身的系统权限仍由远端控制。
+`allowedLocalPaths` 与 `allowedRemotePaths` 控制文件访问范围。配置远端限制时，SFTP 文件读写和传输会检查符号链接解析后的实际路径；新目标校验其父目录，无法安全解析的悬空链接会被拒绝。命令规则使用 `commandWhitelist` / `commandBlacklist`。任意交互 shell 与 rsync 不能在配置了命令过滤的连接上使用；文件操作可使用 SFTP。SSH 账户本身的系统权限仍由远端控制。
 
 ## 认证与环境变量
 

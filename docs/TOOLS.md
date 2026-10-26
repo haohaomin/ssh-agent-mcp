@@ -1,6 +1,6 @@
 # MCP 工具参考
 
-由 `npm run docs:tools` 从实际工具定义生成。共 30 个工具。参数统一使用 camelCase，时间单位为毫秒，偏移明确区分字节和字符。
+由 `npm run docs:tools` 从实际工具定义生成。共 31 个工具。参数统一使用 camelCase，时间单位为毫秒，偏移明确区分字节和字符。
 
 ## ssh_config_reload
 
@@ -677,6 +677,24 @@ Show state (running/exited/killed/lost), exit code, elapsed time and output of a
 ## ssh_server_diagnose
 
 Diagnose one SSH connection without exposing credentials: backend, local dependencies, known_hosts, connection and SFTP probes.
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "connectionName": {
+      "description": "Configured connection name; defaults to the first configured connection",
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}
+```
+
+## ssh_server_disconnect
+
+Disconnect one server (default if omitted), closing its SSH connection, durable terminals and port forwards. Remote background jobs continue. Automatic job polling pauses until an explicit SSH operation reconnects. Other servers are unaffected.
 
 ```json
 {

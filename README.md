@@ -2,7 +2,7 @@
 
 **让 AI 复用你的 SSH 配置，完成远程开发与运维。**
 
-一个 TypeScript MCP 服务，提供 **30 个工具**：命令执行、文件传输与编辑、搜索、目录同步、持久终端、后台任务、双向端口转发、连接诊断、配置热加载和日志清理。常规连接使用 ssh2；OpenSSH 特有配置自动交给本机 `ssh`，使用同一套工具和参数。
+一个 TypeScript MCP 服务，提供 **31 个工具**：命令执行、文件传输与编辑、搜索、目录同步、持久终端、后台任务、双向端口转发、连接诊断、配置热加载和日志清理。常规连接使用 ssh2；OpenSSH 特有配置自动交给本机 `ssh`，使用同一套工具和参数。
 
 [文档网站](https://haohaomin.github.io/ssh-agent-mcp/) · [工具参考](docs/TOOLS.md) · [配置说明](docs/CONFIGURATION.md) · [使用示例](docs/USAGE.md) · [测试报告](docs/TEST_REPORT.md)
 
@@ -56,7 +56,16 @@ npm run build
 
 ### 3. 接入 MCP 客户端
 
-在支持 MCP stdio 的客户端中加入配置，将路径替换为项目的**绝对路径**：
+Codex 可一键注册（保留其他 MCP 配置，并先备份配置文件）：
+
+```bash
+npm run setup:codex
+npm run ui
+```
+
+重新加载客户端的 MCP 连接后即可使用。网页会自动打开并完成本机鉴权，无需复制 HTTP 地址或 Token。
+
+其他支持 MCP stdio 的客户端可加入以下配置，将路径替换为项目的**绝对路径**，并将客户端的工作目录设为项目目录：
 
 ```json
 {
@@ -107,11 +116,11 @@ node build/index.js --config-file servers.json
 
 **后端按配置选择，与调用哪一种工具无关。** `HostName`、`User`、`Port`、单个密钥、`ProxyJump` 等可映射到 ssh2；证书、`Match`、`ProxyCommand` 和其他未映射选项转交 OpenSSH。保守切换可能由普通选项触发，不一定是复杂配置。完整规则见 [配置说明](docs/CONFIGURATION.md)。
 
-## 统一的 30 个工具
+## 统一的 31 个工具
 
 | 类别 | 工具 |
 |---|---|
-| 连接与命令 | `ssh_server_list`、`ssh_server_diagnose`、`ssh_config_reload`、`ssh_exec` |
+| 连接与命令 | `ssh_server_list`、`ssh_server_disconnect`、`ssh_server_diagnose`、`ssh_config_reload`、`ssh_exec` |
 | 传输 | `ssh_upload`、`ssh_download` |
 | 文件操作 | `ssh_file_read`、`ssh_file_write`、`ssh_file_edit`、`ssh_directory_list` |
 | 搜索 | `ssh_file_grep`、`ssh_file_glob` |
@@ -124,6 +133,14 @@ node build/index.js --config-file servers.json
 连接统一用 `connectionName`，默认第一个配置；命令使用 `command/cwd/env/timeoutMs`；路径使用 `localPath/remotePath`。终端输出按 `offsetChars` 读取，文件和落盘日志使用 `offsetBytes`。旧项目的工具名称与参数不保证直接兼容。
 
 参数参考由实际工具 schema 自动生成：[TOOLS.md](docs/TOOLS.md)。工作流示例见 [使用示例](docs/USAGE.md)。
+
+网页在服务器顶部点击 **断开连接**。MCP 可调用：
+
+```json
+{"name":"ssh_server_disconnect","arguments":{"connectionName":"aliyun-server"}}
+```
+
+这会关闭所选服务器的共享 SSH 连接、持久终端和端口转发，保留终端日志；其他服务器不受影响。远端后台任务继续运行，自动状态刷新暂停。再次点击服务器或执行命令、文件操作、任务查询等显式 SSH 操作会自动重连。若只想结束一个终端，使用 `ssh_session_stop`。
 
 ## 需要了解的默认行为
 
@@ -139,7 +156,7 @@ node build/index.js --config-file servers.json
 
 ## HTTP 接入
 
-默认使用 stdio；也可启用 HTTP：
+默认 stdio 入口会自动发现或启动本机共享后台服务。已有 stdio 配置无需改成 HTTP；多个客户端使用相同配置、工作目录和构建版本时，共享 SSH 连接与操作记录。也可显式启用独立 HTTP 进程：
 
 ```bash
 SSH_MCP_HTTP_TOKEN='replace-with-your-token' \
@@ -156,7 +173,29 @@ SSH_MCP_HTTP_TOKEN='replace-with-your-token' \
 node build/index.js --ui --import-ssh-config --http-port 3000
 ```
 
-然后打开 `http://127.0.0.1:3000/ui/`。工作台和 MCP 使用同一个连接管理器，支持服务器切换、持久终端观察与接管、文件浏览/编辑预览/备份，以及连接诊断。`--ui` 会自动启用 HTTP 传输；默认只监听回环地址。工作台不把私钥或密码发送到浏览器，网页请求仍受 `--http-token` / `SSH_MCP_HTTP_TOKEN` 保护。
+命令会自动启动或复用共享后台服务，并打开已完成鉴权的网页。优先使用 3000 端口；被占用时自动选择空闲端口，以启动提示为准。工作台和 MCP 使用同一个连接管理器，支持服务器切换、持久终端观察与输入、文件浏览/编辑预览/备份恢复/文本上传，以及连接诊断。共享服务只监听 `127.0.0.1`，自动生成本机访问 Token；退出启动终端或关闭 AI 客户端不会停止后台服务。网页终端是共享会话的输出与命令输入面板，不会独占输入或暂停其他 MCP 客户端。文件编辑和上传支持最大 4 MiB 的 UTF-8 文本；后台任务和转发可查看、停止，创建仍通过 MCP 工具。服务器配置接口不直接返回私钥或密码，网页请求仍受 `--http-token` / `SSH_MCP_HTTP_TOKEN` 保护。
+
+网页会记住当前标签页选择的服务器、目录和终端会话。终端连续追加输出并保留最近约 13 万字符；后台任务与转发列表约每 5 秒刷新，也会在操作结束后主动更新。文件管理默认进入远端 SFTP 主目录（配置了路径限制时进入首个允许目录），修改冲突时拒绝覆盖并保留草稿。后台服务更新后重新运行 `npm run ui`，即可自动带入新凭据；旧页面不会反复弹出阻塞式登录框。
+
+#### 实时操作记录
+
+左侧的 **操作记录** 汇总此服务收到的全部 MCP 工具调用，以及网页端手动执行的操作。可查看命令参数、实时输出、最终结果、文件编辑差异、失败原因和持续跟踪的任务状态，并按服务器、来源、状态或关键词筛选。
+
+保持原来的 stdio MCP 配置，运行 `npm run ui` 即可。客户端和网页会自动接入同一共享服务，不需要手动更换传输方式、端口或 Token。尚未注册过此项目的 Codex 用户先运行一次 `npm run setup:codex`。显式 `--mcp-transport http` 或 `--standalone` 使用独立进程，不参与自动共享。
+
+```bash
+npm run service:status  # 查看共享服务及网页地址
+npm run service:stop    # 停止此状态目录中所有共享服务
+```
+
+为保留本地文件权限边界，不同工作目录、SSH 配置来源、凭据或权限范围不会合并。更新构建后会使用新的服务实例；旧实例可通过停止命令清理。`--no-open` 可禁止自动打开浏览器。
+
+- 普通命令执行中推送输出，结束后显示成功或失败；文件精确编辑附带统一差异。
+- 后台任务与持久终端约每秒自动跟踪，不需要 AI 主动查询。终端输出属于共享会话，不代表某条输入的独占结果。
+- 暂停显示不停止记录；网络断开后自动重连，刷新或重启服务后可恢复历史。
+- 最近 200 条记录保存在本机状态目录的 `activity-<配置标识>.json`，文件权限为 `0600`。单个文本字段约保留 24,000 字符，长输出标记截断；这是操作观察记录，不是不可篡改的合规审计日志。
+- 已配置凭据和常见敏感字段会尽力脱敏，记录仍可能含命令输出和文件内容，应按敏感本机数据管理。
+
 
 ## 开发与验证
 
@@ -169,7 +208,7 @@ npm run docs:serve       # 在本机预览网站
 npm pack --dry-run      # 检查分发包
 ```
 
-截至 **2026-10-25**，完整功能回归 **301 项通过**。两种后端分别经真实 MCP 客户端实测全部 30 个工具；另有证书、加密密钥、主机公钥拒绝、终端恢复与 tmux 窗口测试。这是测试快照，完整范围见 [测试报告](docs/TEST_REPORT.md)。
+截至 **2026-10-27**，完整功能回归 **394 项通过**。两种后端分别经真实 MCP 客户端实测全部 31 个工具；另有证书、加密密钥、主机公钥拒绝、终端恢复与 tmux 窗口测试。这是测试快照，完整范围见 [测试报告](docs/TEST_REPORT.md)。
 
 真实网络测试需要本机 `sshd`、`ssh-keygen`、`ssh`、`rsync` 和 `tmux`，使用临时密钥与 loopback SSH 服务。测试方法见 [测试文档](test/README.md)。文档网站的 GitHub Pages 构建与发布见 [网站维护](docs/PAGES.md)。
 
