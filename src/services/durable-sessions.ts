@@ -1,3 +1,5 @@
+import { redactionSnapshot } from '../utils/output-redaction.js';
+import { assertUnrestricted } from '../utils/execution-policy.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -23,9 +25,12 @@ export function sessionRequest(meta:SessionMeta,method:string,args:any={}):Promi
 export class DurableSessions {
   constructor(private manager:SSHConnectionManager){}
   private meta(name:string):SessionMeta {const metadata=JSON.parse(fs.readFileSync(sessionPaths(name).meta,'utf8')) as SessionMeta;
+    assertUnrestricted(this.manager.getConfig(metadata.connectionName), 'Durable session access');
     if(metadata.sessionName!==name||metadata.configHash!==configHash(this.manager.getConfig(metadata.connectionName)))throw new Error('Session connection configuration changed; restore the matching configuration to access this worker');return metadata;}
+  instanceIdentity(name:string){const meta=this.meta(name);return JSON.stringify([meta.configHash,meta.pid,meta.startedAt]);}
   connectionName(name:string){return this.meta(name).connectionName || this.manager.getDefaultConnectionName();}
   async start(sessionName:string,connectionName?:string,ensure=false,options:any={}):Promise<any>{
+    assertUnrestricted(this.manager.getConfig(connectionName), 'Durable sessions');
     const name = connectionName || this.manager.getDefaultConnectionName();
     return this.manager.withSessionStart(name, () => this.startWithLock(sessionName, name, ensure, options));
   }
@@ -62,7 +67,7 @@ export class DurableSessions {
         const timer=setTimeout(()=>{child.kill();reject(new Error('Session startup timed out'));},Math.max(30000,config.connectionTimeoutMs||0)+15000);
         child.once('error',error=>{clearTimeout(timer);reject(error);});child.once('exit',()=>{clearTimeout(timer);reject(new Error('Session worker exited during startup'));});
         child.once('message',(message:any)=>{clearTimeout(timer);message.error?reject(new Error(message.error)):resolve(message.result);});
-        child.send({sessionName,connectionName,config,options,paths});
+        child.send({sessionName,connectionName,config,options,paths,redactionValues:redactionSnapshot()});
       });
       child.disconnect();child.unref();
       result.observer=this.observe(result,options.observerMode);

@@ -2,7 +2,7 @@
 
 **让 AI 复用你的 SSH 配置，完成远程开发与运维。**
 
-一个 TypeScript MCP 服务，提供 **31 个工具**：命令执行、文件传输与编辑、搜索、目录同步、持久终端、后台任务、双向端口转发、连接诊断、配置热加载和日志清理。常规连接使用 ssh2；OpenSSH 特有配置自动交给本机 `ssh`，使用同一套工具和参数。
+一个 TypeScript MCP 服务，提供 **33 个工具**：命令与多机聚合执行、文件传输与编辑、搜索、目录同步、持久终端、后台任务、双向端口转发、连接诊断、配置热加载和日志清理。常规连接使用 ssh2；OpenSSH 特有配置自动交给本机 `ssh`，使用同一套工具和参数。
 
 [文档网站](https://haohaomin.github.io/ssh-agent-mcp/) · [工具参考](docs/TOOLS.md) · [配置说明](docs/CONFIGURATION.md) · [使用示例](docs/USAGE.md) · [测试报告](docs/TEST_REPORT.md)
 
@@ -116,12 +116,12 @@ node build/index.js --config-file servers.json
 
 **后端按配置选择，与调用哪一种工具无关。** `HostName`、`User`、`Port`、单个密钥、`ProxyJump` 等可映射到 ssh2；证书、`Match`、`ProxyCommand` 和其他未映射选项转交 OpenSSH。保守切换可能由普通选项触发，不一定是复杂配置。完整规则见 [配置说明](docs/CONFIGURATION.md)。
 
-## 统一的 31 个工具
+## 统一的 33 个工具
 
 | 类别 | 工具 |
 |---|---|
-| 连接与命令 | `ssh_server_list`、`ssh_server_disconnect`、`ssh_server_diagnose`、`ssh_config_reload`、`ssh_exec` |
-| 传输 | `ssh_upload`、`ssh_download` |
+| 连接与命令 | `ssh_server_list`、`ssh_server_disconnect`、`ssh_server_diagnose`、`ssh_config_reload`、`ssh_exec`、`ssh_exec_many` |
+| 传输 | `ssh_upload`、`ssh_download`、`ssh_file_transfer` |
 | 文件操作 | `ssh_file_read`、`ssh_file_write`、`ssh_file_edit`、`ssh_directory_list` |
 | 搜索 | `ssh_file_grep`、`ssh_file_glob` |
 | 同步 | `ssh_sync` |
@@ -130,7 +130,9 @@ node build/index.js --config-file servers.json
 | 后台任务 | `ssh_job_start`、`ssh_job_status`、`ssh_job_kill`、`ssh_job_list` |
 | 端口转发 | `ssh_forward_start`、`ssh_forward_reverse`、`ssh_forward_list`、`ssh_forward_stop` |
 
-连接统一用 `connectionName`，默认第一个配置；命令使用 `command/cwd/env/timeoutMs`；路径使用 `localPath/remotePath`。终端输出按 `offsetChars` 读取，文件和落盘日志使用 `offsetBytes`。旧项目的工具名称与参数不保证直接兼容。
+连接统一用 `connectionName`，仅单连接可省略，多连接必须明确选择；`ssh_exec` 支持单条 `command`、通过 stdin 发送的多行 `script`（bash/sh/python3），或共享目录与变量的 `steps`。可选 `sudo`、`failFast`、`envFromRemoteFiles`，默认返回最多 64 KiB 正文并保留退出状态，超限输出尝试完整落盘。`ssh_exec` 与 `ssh_job_start` 可选 `resourceKey` 使用远端协作锁；`ssh_file_transfer` 支持校验前缀后的断点续传，完整 exec 日志自动按保留策略清理。返回同时包含结构化 `exitCode`、`steps`、`fullOutputPath` 等字段；管理员可启用 `actions-only` 固定动作策略。具体语义和受限连接规则见 [执行工作流](docs/USAGE.md#执行命令)。
+
+已有本地文件直接使用 `ssh_upload(localPath, remotePath)`，无需把文件内容放进对话。终端输出按 `offsetChars` 读取，文件和落盘日志使用 `offsetBytes`。旧项目的工具名称与参数不保证直接兼容。
 
 参数参考由实际工具 schema 自动生成：[TOOLS.md](docs/TOOLS.md)。工作流示例见 [使用示例](docs/USAGE.md)。
 
@@ -151,7 +153,7 @@ node build/index.js --config-file servers.json
 - **配置热加载**：`ssh_config_reload` 无需参数，重读启动时的 JSON/OpenSSH 配置并保留命令行覆盖。未变化的 ssh2 连接保持开启，变化/移除的连接和原生 OpenSSH 连接断开后按需重连。修改配置前先停止对应持久终端。
 - **连接诊断**：`ssh_server_diagnose` 检查 SSH 连接与 SFTP，并报告本机 ssh/rsync、known_hosts 和原生配置文件状态；不返回密码或密钥内容。
 - **配置命令在连接时运行**：导入不执行 `Match exec` / `ProxyCommand`，原生连接时由 OpenSSH 执行。
-- **权限遵循你的连接**：可配置命令过滤及本地/远端路径范围；交互 shell 和 rsync 要求未配置命令过滤的连接。命令过滤不等同远端系统沙箱。
+- **权限遵循你的连接**：可配置命令过滤及本地/远端路径范围；交互 shell 和 rsync 要求未配置命令过滤的连接。命令过滤不等同远端系统沙箱。可选 [固定动作模式](docs/CONFIGURATION.md#固定动作模式) 只开放管理员配置的程序和固定参数，同时关闭文件、终端、任务和转发旁路；系统权限仍需由远端低权限账户控制。
 - **文件编辑与搜索有边界**：原子编辑需要 SFTP POSIX rename 扩展；搜索有资源预算并报告截断。详细行为见 [使用示例](docs/USAGE.md) 和 [功能检查](docs/FEATURE_AUDIT.md)。
 
 ## HTTP 接入
@@ -208,7 +210,7 @@ npm run docs:serve       # 在本机预览网站
 npm pack --dry-run      # 检查分发包
 ```
 
-截至 **2026-10-27**，完整功能回归 **394 项通过**。两种后端分别经真实 MCP 客户端实测全部 31 个工具；另有证书、加密密钥、主机公钥拒绝、终端恢复与 tmux 窗口测试。这是测试快照，完整范围见 [测试报告](docs/TEST_REPORT.md)。
+截至 **2026-10-30**，完整功能回归 **486 项通过**。两种后端分别经真实 MCP 客户端实测全部 33 个工具；另有证书、加密密钥、主机公钥拒绝、终端恢复与 tmux 窗口测试。这是测试快照，完整范围见 [测试报告](docs/TEST_REPORT.md)。
 
 真实网络测试需要本机 `sshd`、`ssh-keygen`、`ssh`、`rsync` 和 `tmux`，使用临时密钥与 loopback SSH 服务。测试方法见 [测试文档](test/README.md)。文档网站的 GitHub Pages 构建与发布见 [网站维护](docs/PAGES.md)。
 

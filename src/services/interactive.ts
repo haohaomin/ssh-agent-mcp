@@ -1,3 +1,5 @@
+import { RedactionStream } from '../utils/output-redaction.js';
+import { assertUnrestricted } from '../utils/execution-policy.js';
 import fs from 'node:fs';
 import { withEnvironment, shellQuote } from '../utils/shell.js';
 import type { Client, ClientChannel } from 'ssh2';
@@ -19,6 +21,7 @@ export class InteractiveService {
   private reverseForwards = new Map<string, { onClose: () => void; client: Client; port: number; bindHost: string; localHost: string; localPort: number; connectionName?: string; sockets: Set<net.Socket>; handler: (...args: any[]) => void }>();
   constructor(private manager: Connections) {}
   async start(id: string, connectionName?: string, ensure = false, options: { cwd?: string; env?: Record<string, string>; shell?: string; logPath?: string;cols?:number;rows?:number } = {}): Promise<unknown> {
+    assertUnrestricted(this.manager.getConfig(connectionName), 'Interactive sessions');
     const cols=options.cols??120,rows=options.rows??30;dimensions(cols,rows);
     const existing = this.sessions.get(id);
     if (existing && !existing.closed) {
@@ -50,17 +53,18 @@ export class InteractiveService {
       if (generation !== this.generation) { channel.close(); throw new Error("Server is closing"); }
       const session: Session = { id, connectionName, channel, cols, rows, output: '', base: 0, total: 0, closed: false, decoder: new StringDecoder('utf8'), stderrDecoder: new StringDecoder('utf8') };
       const logFd = options.logPath ? fs.openSync(options.logPath, 'a', 0o600) : undefined;
+      const stdoutRedactor = new RedactionStream(), stderrRedactor = new RedactionStream();
       const append = (text: string) => {
         if (logFd !== undefined) fs.writeSync(logFd, text);
         session.output += text; session.total += text.length;
         if (session.output.length > 1024 * 1024) session.output = session.output.slice(-1024 * 1024);
         session.base = session.total - session.output.length;
       };
-      channel.on('data', (data: Buffer) => append(session.decoder.write(data)));
-      channel.stderr.on('data', (data: Buffer) => append(session.stderrDecoder.write(data)));
+      channel.on('data', (data: Buffer) => append(stdoutRedactor.write(session.decoder.write(data))));
+      channel.stderr.on('data', (data: Buffer) => append(stderrRedactor.write(session.stderrDecoder.write(data))));
       channel.on('error', (err: Error) => { session.error = err.message; session.closed = true; });
       const onClientClose = () => { session.closed = true; };
-      channel.on('close', () => { append(session.decoder.end()); append(session.stderrDecoder.end()); if (logFd !== undefined) fs.closeSync(logFd); session.closed = true; client.removeListener('close', onClientClose); });
+      channel.on('close', () => { append(stdoutRedactor.write(session.decoder.end()) + stdoutRedactor.finishMasked()); append(stderrRedactor.write(session.stderrDecoder.end()) + stderrRedactor.finishMasked()); if (logFd !== undefined) fs.closeSync(logFd); session.closed = true; client.removeListener('close', onClientClose); });
       client.once('close', onClientClose);
       this.sessions.set(id, session);
       if (options.cwd || Object.keys(options.env || {}).length) {
@@ -86,6 +90,7 @@ export class InteractiveService {
   }
   write(id: string, input: string) {
     const s = this.sessions.get(id); if (!s || s.closed) throw new Error('Session is not running');
+    assertUnrestricted(this.manager.getConfig(s.connectionName), 'Interactive session input');
     s.channel.write(input); return this.info(s);
   }
   stop(id: string) { const s = this.sessions.get(id); if (!s) throw new Error('Session not found'); s.channel.close(); this.sessions.delete(id); return { stopped: id }; }
@@ -94,6 +99,7 @@ export class InteractiveService {
     if (client && this.manager.getClient(name) !== client) throw new Error('SSH connection changed while opening forward');
   }
   async forward(remoteHost: string, remotePort: number, localPort = 0, connectionName?: string, bindHost = '127.0.0.1') {
+    assertUnrestricted(this.manager.getConfig(connectionName), 'Port forwarding');
     if (this.forwards.size + this.pendingLocalForwards >= 32) throw new Error('Forward limit reached');
     this.pendingLocalForwards++;
     try { return await this.openLocalForward(remoteHost, remotePort, localPort, connectionName, bindHost, this.generation); }
@@ -135,6 +141,7 @@ export class InteractiveService {
     return this.listForwards().find(f => f.forwardId === id)!;
   }
   async reverseForward(localHost: string, localPort: number, remotePort = 0, connectionName?: string, bindHost = '127.0.0.1') {
+    assertUnrestricted(this.manager.getConfig(connectionName), 'Reverse port forwarding');
     if (this.reverseForwards.size + this.pendingRemoteForwards >= 32) throw new Error('Forward limit reached');
     this.pendingRemoteForwards++;
     try { return await this.openRemoteForward(localHost, localPort, remotePort, connectionName, bindHost, this.generation); }

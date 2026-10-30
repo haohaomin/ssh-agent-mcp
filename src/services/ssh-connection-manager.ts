@@ -1,4 +1,10 @@
-import { DurableSessions } from "./durable-sessions.js";
+import { loadRedactionValues, installRedactionValues, redactText, redactValue, redactionContextBytes, redactByteSlice } from '../utils/output-redaction.js';
+import { withResourceLock } from '../utils/resource-lock.js';
+import { cleanupExecLogs } from './exec-log-retention.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { newExecutionResult, StepEventDecoder, type ExecutionResult } from '../utils/execution-result.js';
+import { assertUnrestricted, validateExecutionPolicy, actionCommand } from '../utils/execution-policy.js';
+import { DurableSessions, stateDirectory } from "./durable-sessions.js";
 import type { ActivityMonitor } from "./activity-monitor.js";
 import { OpenSshClient } from './openssh-client.js';
 import { InteractiveService } from "./interactive.js";
@@ -12,8 +18,9 @@ import {
 } from "../models/types.js";
 import { Logger } from "../utils/logger.js";
 import { collectSystemStatus } from "../utils/status-collector.js";
-import { ToolError } from "../utils/tool-error.js";
-import { shellQuote } from "../utils/shell.js";
+import { ToolError, toToolError } from "../utils/tool-error.js";
+import { shellQuote, withEnvironment } from "../utils/shell.js";
+import { buildStepsScript, withRemoteEnvironment } from "../utils/exec-script.js";
 import {
   assertValidJobId,
   buildJobKillScript,
@@ -33,12 +40,24 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { StringDecoder } from "node:string_decoder";
 import { isDeepStrictEqual } from "node:util";
+import { randomUUID } from "node:crypto";
 
 const require = createRequire(import.meta.url);
 
 type RunCommandOptions = {
+  resourceKey?: string;
+  action?: string;
   timeout?: number;
   prevalidatedInternalCommand?: boolean;
+  env?: Record<string, string>;
+  script?: string;
+  interpreter?: "bash" | "sh" | "python3";
+  sudo?: boolean;
+  maxBytes?: number;
+  failFast?: boolean;
+  steps?: string[];
+  stopOnError?: boolean;
+  envFromRemoteFiles?: Record<string, string>;
 };
 
 type LocalPathPurpose = "read" | "write";
@@ -138,6 +157,59 @@ function applyCommandTemplate(template: string, command: string): string {
     .join(quotedCommand)
     .split(COMMAND_TEMPLATE_PLACEHOLDER)
     .join(command);
+}
+
+function applyEnvironmentAndSudo(
+  command: string,
+  env?: Record<string, string>,
+  sudo?: boolean,
+  envFromRemoteFiles?: Record<string, string>,
+): string {
+  command = withRemoteEnvironment(command, envFromRemoteFiles);
+  if (!sudo) {
+    return withEnvironment(command, env);
+  }
+
+  // sudo normally resets the environment. Put both exports and the command in
+  // the elevated shell so sudo:true also works with env.
+  return `sudo -n -- sh -c ${shellQuote(withEnvironment(command, env))}`;
+}
+
+/** Keep validation and execution on the same interpreter invocation. */
+function scriptInterpreterCommand(options: RunCommandOptions): string {
+  if (options.interpreter === "python3") {
+    // Explicit stdin source, unbuffered stdout/stderr for live output reporting.
+    return "python3 -u -";
+  }
+  const interpreter = options.interpreter ?? "bash";
+  const errexit = options.steps !== undefined ? (options.stopOnError ?? true) : options.failFast;
+  const pipefail = interpreter === "bash" && (errexit || options.steps !== undefined);
+  return `${interpreter}${errexit ? ' -e' : ''}${pipefail ? ' -o pipefail' : ''} -s`;
+}
+
+function isUtf8ContinuationByte(byte: number | undefined): boolean {
+  return byte !== undefined && (byte & 0xc0) === 0x80;
+}
+
+/** Return a prefix length that does not split a UTF-8 code point. */
+function utf8SafeHeadLength(buffer: Buffer, requestedBytes: number): number {
+  let length = Math.min(Math.max(0, requestedBytes), buffer.length);
+  if (length === buffer.length) {
+    return length;
+  }
+  while (length > 0 && isUtf8ContinuationByte(buffer[length])) {
+    length -= 1;
+  }
+  return length;
+}
+
+/** Return a suffix length that starts on a UTF-8 code point boundary. */
+function utf8SafeTailStart(buffer: Buffer, requestedBytes: number): number {
+  let start = Math.max(0, buffer.length - Math.max(0, requestedBytes));
+  while (start < buffer.length && isUtf8ContinuationByte(buffer[start])) {
+    start += 1;
+  }
+  return start;
 }
 
 /**
@@ -253,6 +325,9 @@ export class SSHConnectionManager {
   private startingSessions = new Map<string, number>();
   private pendingConnections: Map<string, Promise<void>> = new Map();
   private pendingStatusCollections: Map<string, NodeJS.Timeout> = new Map();
+  // Internal job-page reads retain raw context until pagination-aware masking. Never exposed as a tool option.
+  private readonly jobReadContext = new AsyncLocalStorage<boolean>();
+  private executionContext = new AsyncLocalStorage<{result: ExecutionResult; stepToken: string; phase: NonNullable<ExecutionResult["failureStage"]>}>();
   private commandWhitelistRegexes: Map<string, RegExp[]> = new Map();
   private commandBlacklistRegexes: Map<string, RegExp[]> = new Map();
   private shellStreams: Map<string, ClientChannel> = new Map();
@@ -285,6 +360,8 @@ export class SSHConnectionManager {
     configs: SshConnectionConfigMap,
     defaultName?: string,
   ): void {
+    const redactions = loadRedactionValues(configs);
+    for (const config of Object.values(configs)) validateExecutionPolicy(config);
     this.disconnect();
 
     this.commandWhitelistRegexes.clear();
@@ -301,6 +378,7 @@ export class SSHConnectionManager {
       );
     }
 
+    installRedactionValues(redactions);
     this.configs = configs;
     if (defaultName && configs[defaultName]) {
       this.defaultName = defaultName;
@@ -318,8 +396,10 @@ export class SSHConnectionManager {
     defaultName?: string,
   ): { added: string[]; changed: string[]; removed: string[]; preserved: string[] } {
     // Validate everything before mutating live connections or policy caches.
+    const redactions = loadRedactionValues(configs);
     const whitelists = new Map<string, RegExp[]>(), blacklists = new Map<string, RegExp[]>();
     for (const [name, config] of Object.entries(configs)) {
+      validateExecutionPolicy(config);
       whitelists.set(name, this.compilePatterns(config.commandWhitelist, name, "whitelist"));
       blacklists.set(name, this.compilePatterns(config.commandBlacklist, name, "blacklist"));
     }
@@ -346,6 +426,7 @@ export class SSHConnectionManager {
 
     this.commandWhitelistRegexes = whitelists;
     this.commandBlacklistRegexes = blacklists;
+    installRedactionValues(redactions, true);
     this.configs = configs;
     if (defaultName && configs[defaultName]) this.defaultName = defaultName;
     else if (!configs[this.defaultName] && Object.keys(configs).length > 0) this.defaultName = Object.keys(configs)[0];
@@ -357,6 +438,16 @@ export class SSHConnectionManager {
   public reloadFromSource() {
     if (!this.configLoader) throw new Error("No startup configuration source registered");
     return this.reloadConfig(this.configLoader());
+  }
+
+  public resolveConnectionName(name?: string): string {
+    const names = Object.keys(this.configs);
+    if (name === undefined && names.length !== 1) {
+      throw new ToolError("CONNECTION_REQUIRED", `Specify connectionName. Available connections: ${names.join(', ') || '(none)'}`);
+    }
+    const resolved = name ?? names[0];
+    if (!Object.hasOwn(this.configs, resolved)) throw new ToolError("CONNECTION_NOT_FOUND", `Unknown connectionName: ${resolved}. Available connections: ${names.join(', ')}`);
+    return resolved;
   }
 
   public getDefaultConnectionName(): string { return this.defaultName; }
@@ -572,6 +663,7 @@ export class SSHConnectionManager {
    * Get SSH Client with specified name
    */
   public getClient(name?: string): Client {
+    assertUnrestricted(this.getConfig(name), 'Raw SSH channel access');
     const key = name || this.defaultName;
     const client = this.clients.get(key);
     if (!client) {
@@ -580,16 +672,132 @@ export class SSHConnectionManager {
     return client;
   }
 
+  /** Typed transport outcome, with the legacy string API retained for existing callers. */
+  public async executeCommandDetailed(cmdString: string | undefined, directory?: string, name?: string, options: RunCommandOptions = {}): Promise<ExecutionResult> {
+    const result = newExecutionResult(options.steps?.length);
+    result.connectionName = name ?? this.defaultName;
+    return this.executionContext.run({result, stepToken: randomUUID().replaceAll('-', ''), phase: 'validation'}, async () => {
+      try { result.output = await this.executeCommand(cmdString, directory, name, options); }
+      catch (error) {
+        const failure = toToolError(error, 'UNKNOWN_ERROR');
+        result.output = failure.message;
+        result.error = {code: failure.code, message: failure.message, retriable: failure.retriable};
+        result.failureStage = result.started || failure.commandRan ? 'execution' : this.executionContext.getStore()!.phase;
+        if (failure.commandRan) { result.started = true; result.completed = true; }
+        result.timedOut = failure.code === 'COMMAND_TIMEOUT';
+        result.captureLimitExceeded = failure.code === 'OUTPUT_LIMIT_EXCEEDED';
+        result.truncated ||= result.captureLimitExceeded;
+      }
+      const anyStarted = result.steps.some(step => step.status !== 'not_started');
+      for (const step of result.steps) {
+        if (step.status === 'running') step.status = 'unknown';
+        if (step.status === 'not_started' && anyStarted && result.completed) step.status = 'skipped';
+      }
+      return redactValue(result);
+    });
+  }
+
   /**
    * Execute SSH command
    */
   public async executeCommand(
-    cmdString: string,
+    cmdString: string | undefined,
     directory?: string,
     name?: string,
-    options: { timeout?: number } = {},
+    options: RunCommandOptions = {},
   ): Promise<string> {
-    return this.runCommandInternal(cmdString, directory, name, options);
+    if (options.maxBytes !== undefined && (!Number.isSafeInteger(options.maxBytes) || options.maxBytes <= 0)) {
+      throw new ToolError("COMMAND_VALIDATION_FAILED", "maxBytes must be a positive safe integer", false);
+    }
+    try {
+      const output = await this.runCommandInternal(
+        cmdString,
+        directory,
+        name,
+        options,
+      );
+      return this.applyOutputBudget(output, options.maxBytes);
+    } catch (error) {
+      if (
+        error instanceof ToolError &&
+        options.maxBytes !== undefined &&
+        (error.commandRan ||
+          (error.code === "COMMAND_EXECUTION_ERROR" && error.resultSuffix !== "") ||
+          error.code === "OUTPUT_LIMIT_EXCEEDED" ||
+          error.code === "COMMAND_TIMEOUT")
+      ) {
+        throw new ToolError(
+          error.code,
+          this.applyOutputBudget(error.message, options.maxBytes, error.resultSuffix),
+          error.retriable,
+          error.commandRan,
+          error.resultSuffix,
+        );
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Limit only the text returned to the caller. `maxOutputBytes` remains the
+   * hard capture limit that aborts an unbounded command; a truncated result is
+   * also written to the private state directory so no captured output is lost.
+   */
+  private applyOutputBudget(output: string, maxBytes?: number, resultSuffix = ""): string {
+    output = redactText(output);
+    resultSuffix = redactText(resultSuffix);
+    if (maxBytes === undefined) {
+      return output;
+    }
+    if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
+      throw new ToolError(
+        "COMMAND_VALIDATION_FAILED",
+        `maxBytes must be a positive integer, got: ${String(maxBytes)}`,
+        false,
+      );
+    }
+
+    const fullOutput = Buffer.from(output, "utf8");
+    const body = resultSuffix && output.endsWith(resultSuffix)
+      ? Buffer.from(output.slice(0, -resultSuffix.length).replace(/\n$/, ''), "utf8")
+      : fullOutput;
+    // Transport status is outside the payload budget, including at tiny limits.
+    if (body.length <= maxBytes) return output;
+
+    const result = this.executionContext.getStore()?.result;
+    if (result) result.truncated = true;
+    let storageNotice: string;
+    try {
+      const outputDirectory = path.resolve(stateDirectory(), "exec-output");
+      fs.mkdirSync(outputDirectory, { recursive: true, mode: 0o700 });
+      if (!fs.lstatSync(outputDirectory).isDirectory()) throw new Error('exec-output must be a real directory');
+      fs.chmodSync(outputDirectory, 0o700);
+      const fullOutputPath = path.join(outputDirectory, `${randomUUID()}.log`);
+      fs.writeFileSync(fullOutputPath, fullOutput, { flag: "wx", mode: 0o600 });
+      if (result) result.fullOutputPath = fullOutputPath;
+      storageNotice = `full output: ${fullOutputPath}`;
+      // Retention failure cannot turn a completed remote command into a replayable error.
+      try { cleanupExecLogs({dryRun:false,protectPath:fullOutputPath}); } catch { /* Manual cleanup can report filesystem errors. */ }
+    } catch (error) {
+      // The remote operation has already completed. A local storage failure
+      // must not replace its result or encourage replay of a side effect.
+      if (result) result.outputStorageError = (error as NodeJS.ErrnoException).code || 'WRITE_FAILED';
+      storageNotice = `full output unavailable: ${(error as NodeJS.ErrnoException).code || 'WRITE_FAILED'}; output could not be saved`;
+    }
+
+
+    const headBudget = Math.floor(maxBytes / 2);
+    const tailBudget = maxBytes - headBudget;
+    const headLength = utf8SafeHeadLength(body, headBudget);
+    const tailStart = Math.max(headLength, utf8SafeTailStart(body, tailBudget));
+    const tailLength = body.length - tailStart;
+    const head = body.subarray(0, headLength).toString("utf8");
+    const tail = body.subarray(tailStart).toString("utf8");
+    const notice =
+      `[output truncated: kept first ${headLength} and last ${tailLength} ` +
+      `of ${body.length} output bytes; ${storageNotice}]`;
+
+    return [head, notice, tail, resultSuffix].filter(Boolean).join("\n");
   }
 
   /** Resolve existing targets and new destinations before restricted SFTP access. */
@@ -768,6 +976,7 @@ export class SSHConnectionManager {
     name?: string,
   ): Promise<string> {
     const config = this.getConfig(name);
+    this.assertSftpAllowed(config);
     const key = name || this.defaultName;
     if (this.getTransportMode(config) === "shell") {
       throw new ToolError(
@@ -866,6 +1075,7 @@ export class SSHConnectionManager {
     name?: string,
   ): Promise<string> {
     const config = this.getConfig(name);
+    this.assertSftpAllowed(config);
     const key = name || this.defaultName;
     if (this.getTransportMode(config) === "shell") {
       throw new ToolError(
@@ -980,6 +1190,7 @@ export class SSHConnectionManager {
   }
 
   private assertSftpAllowed(config: SSHConfig): void {
+    assertUnrestricted(config, 'SFTP and file transfer');
     if (this.getTransportMode(config) === "shell") {
       throw new ToolError(
         "UNSUPPORTED_IN_SHELL_MODE",
@@ -1041,13 +1252,15 @@ export class SSHConnectionManager {
       const total = stats.size;
       const start = Math.min(offset, total);
       const end = Math.min(total, start + length);
+      const contextBytes = redactionContextBytes();
+      const readStart = Math.max(0, start - contextBytes), readEnd = Math.min(total, end + contextBytes);
       const chunks: Buffer[] = [];
       if (end > start) {
         await this.withTimeout(
           pipeline(
             sftp.createReadStream(validatedRemotePath, {
-              start,
-              end: end - 1,
+              start: readStart,
+              end: readEnd - 1,
             }),
             async function (source: AsyncIterable<Buffer>) {
               for await (const chunk of source) {
@@ -1073,7 +1286,7 @@ export class SSHConnectionManager {
       const header = `[file] ${validatedRemotePath}\n[bytes] ${start}-${end} of ${total}${
         end < total ? ` (next offset ${end})` : " (end of file)"
       }\n---\n`;
-      return header + buffer.toString("utf8");
+      return header + redactByteSlice(buffer, start - readStart, end - readStart);
     } catch (error) {
       if (error instanceof ToolError) {
         throw error;
@@ -2072,6 +2285,7 @@ export class SSHConnectionManager {
   }
 
   private scheduleStatusCollection(key: string): void {
+    if (this.getConfig(key).executionPolicy) return;
     const existingStatusCollection = this.pendingStatusCollections.get(key);
     if (existingStatusCollection) {
       clearTimeout(existingStatusCollection);
@@ -2187,6 +2401,7 @@ export class SSHConnectionManager {
     exitCode?: number,
     exitSignal?: string,
   ): string {
+    stdout = redactText(stdout, true); stderr = redactText(stderr, true);
     const outputSections: string[] = [];
 
     if (stdout) {
@@ -2218,6 +2433,7 @@ export class SSHConnectionManager {
    * stderr into stdout, so `stderr` is empty here and the output is unchanged.
    */
   private formatCommandSuccess(stdout: string, stderr: string): string {
+    stdout = redactText(stdout, true); stderr = redactText(stderr, true);
     if (!stderr) {
       return stdout;
     }
@@ -2234,7 +2450,17 @@ export class SSHConnectionManager {
     cmdString: string,
     directory?: string,
     name?: string,
+    options: {resourceKey?: string; interpreter?: "bash" | "sh" | "python3"; failFast?: boolean; env?: Record<string, string>; script?: boolean} = {},
   ): Promise<{ jobId: string; message: string }> {
+    const config = this.getConfig(name);
+    assertUnrestricted(config, 'Background tasks');
+    if(options.resourceKey!==undefined){withResourceLock(':',options.resourceKey);if(config.commandWhitelist?.length||config.commandBlacklist?.length)throw new ToolError('COMMAND_VALIDATION_FAILED','resourceKey is unavailable with command filters');}
+    if (!cmdString || cmdString.includes('\0')) throw new ToolError('COMMAND_VALIDATION_FAILED', 'Job source must be nonempty and contain no NUL');
+    if (options.script && config.commandWhitelist?.length) throw new ToolError('COMMAND_VALIDATION_FAILED', 'Background scripts are unavailable with commandWhitelist');
+    if (Object.keys(options.env || {}).length && (config.commandWhitelist?.length || config.commandBlacklist?.length)) throw new ToolError('COMMAND_VALIDATION_FAILED', 'Job environment overrides are unavailable with command filters');
+    if (options.interpreter && !['bash','sh','python3'].includes(options.interpreter)) throw new ToolError('COMMAND_VALIDATION_FAILED', 'Invalid job interpreter');
+    if (options.interpreter === 'python3' && options.failFast !== undefined) throw new ToolError('COMMAND_VALIDATION_FAILED', 'failFast requires a shell interpreter');
+    if (options.script && !this.validateCommand(options.interpreter || 'bash', name).isAllowed) throw new ToolError('COMMAND_VALIDATION_FAILED', 'Job interpreter rejected by command filters');
     const validation = this.validateCommand(cmdString, name);
     if (!validation.isAllowed) {
       throw new ToolError(
@@ -2244,11 +2470,14 @@ export class SSHConnectionManager {
       );
     }
     const jobId = generateJobId();
-    const message = await this.runJobScript(
-      buildJobStartScript(jobId, cmdString, directory),
-      name,
-    );
-    return { jobId, message };
+    try {
+      const message = await this.runJobScript(withEnvironment(buildJobStartScript(jobId, cmdString, directory, options), options.env), name);
+      return { jobId, message };
+    } catch (error) {
+      const failure = toToolError(error, 'UNKNOWN_ERROR');
+      Object.assign(failure, {jobId, connectionName: name ?? this.defaultName});
+      throw failure;
+    }
   }
 
   public async jobStatus(
@@ -2256,6 +2485,7 @@ export class SSHConnectionManager {
     options: { offset?: number; tailBytes?: number; maxBytes?: number },
     name?: string,
   ): Promise<string> {
+    if (redactionContextBytes()) return (await this.jobStatusDetailed(jobId, options, name)).output;
     this.assertJobId(jobId);
     const maxBytes = options.maxBytes ?? DEFAULT_JOB_OUTPUT_BYTES;
     return this.runJobScript(
@@ -2268,13 +2498,48 @@ export class SSHConnectionManager {
     );
   }
 
+  public async jobStatusDetailed(jobId: string, options: {offset?: number; tailBytes?: number; maxBytes?: number}, name?: string) {
+    this.assertJobId(jobId);
+    const token = `__MCP_JOB_${randomUUID().replaceAll('-', '')}__`;
+    const context = redactionContextBytes();
+    const script = buildJobStatusScript(jobId, {...options, tailBytes: options.tailBytes ?? 8192, maxBytes: options.maxBytes ?? DEFAULT_JOB_OUTPUT_BYTES, metadataToken: token, redactionContextBytes: context});
+    let text: string;
+    try { text = await this.jobReadContext.run(context > 0, () => this.runJobScript(script, name)); }
+    catch (error) {
+      if (!context) throw error;
+      const failure = toToolError(error, 'COMMAND_EXECUTION_ERROR');
+      // Partial context cannot be safely paginated; never return it on failure.
+      throw new ToolError(failure.code, 'Job status read failed; partial output suppressed by redaction policy', failure.retriable);
+    }
+    const line = text.split('\n').find(line => line.startsWith(token + '|'));
+    if (!line) throw new ToolError('COMMAND_EXECUTION_ERROR', 'Job status metadata missing; remote outcome unknown');
+    const [,state,code,pid,elapsed,start,end,size] = line.trimEnd().split('|');
+    const position = text.indexOf(line);
+    let output = text.slice(0, position) + text.slice(position + line.length + (text[position + line.length] === '\n' ? 1 : 0));
+    const number = (value: string) => value && /^\d+$/.test(value) && Number.isSafeInteger(Number(value)) ? Number(value) : null;
+    if (!['running','exited','killed','lost','not_found'].includes(state)) throw new ToolError('COMMAND_EXECUTION_ERROR', 'Invalid job state metadata');
+    if (context && state !== 'not_found') {
+      const from = number(start), to = number(end), total = number(size), marker = output.indexOf('\n---\n');
+      if (from === null || to === null || total === null || to < from || to > total || marker < 0) throw new ToolError('COMMAND_EXECUTION_ERROR', 'Invalid job output metadata');
+      const readStart = Math.max(0, from - context);
+      const encoded = output.slice(marker + 5).replace(/\s/g, '');
+      if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) throw new ToolError('COMMAND_EXECUTION_ERROR', 'Invalid job output encoding; output suppressed');
+      const body = Buffer.from(encoded, 'base64');
+      if (body.length !== Math.min(total, to + context) - readStart) throw new ToolError('COMMAND_EXECUTION_ERROR', 'Incomplete job output context; output suppressed');
+      output = output.slice(0, marker + 5) + redactByteSlice(body, from - readStart, to - readStart);
+    }
+    return {connectionName: name ?? this.defaultName, jobId, state, exitCode: number(code), pid: number(pid), elapsedSeconds: number(elapsed),
+      offsetBytes: number(start), nextOffsetBytes: number(end), totalBytes: number(size),
+      output: redactText(output), remoteLogPath: `.ssh-mcp-jobs/${jobId}/out`, remoteLogPathBase: 'ssh-account-home'};
+  }
+
   public async jobKill(jobId: string, name?: string): Promise<string> {
     this.assertJobId(jobId);
     return this.runJobScript(buildJobKillScript(jobId), name, 30000);
   }
 
   public async jobList(limit: number, name?: string): Promise<string> {
-    return this.runJobScript(buildJobListScript(limit), name);
+    return this.runJobScript(buildJobListScript(limit, redactionContextBytes() > 0), name);
   }
 
   private assertJobId(jobId: string): void {
@@ -2297,40 +2562,141 @@ export class SSHConnectionManager {
   }
 
   private async runCommandInternal(
-    cmdString: string,
+    cmdString: string | undefined,
     directory?: string,
     name?: string,
     options: RunCommandOptions = {},
   ): Promise<string> {
-    if (!options.prevalidatedInternalCommand) {
-      const validationResult = this.validateCommand(cmdString, name);
-      if (!validationResult.isAllowed) {
-        throw new ToolError(
-          "COMMAND_VALIDATION_FAILED",
-          `Command validation failed: ${validationResult.reason}`,
-          false,
-        );
+    const invalid = (message: string): never => {
+      throw new ToolError("COMMAND_VALIDATION_FAILED", message, false);
+    };
+    const policyConfig = this.getConfig(name);
+    if (options.resourceKey !== undefined) withResourceLock(':', options.resourceKey);
+    if (options.action !== undefined) {
+      if (cmdString !== undefined || directory !== undefined || ['resourceKey', 'script', 'steps', 'env', 'envFromRemoteFiles', 'interpreter', 'failFast', 'stopOnError'].some(field => options[field as keyof RunCommandOptions] !== undefined) || options.sudo) {
+        invalid('action cannot be combined with command, script, steps, cwd, env, envFromRemoteFiles, interpreter, failFast, stopOnError or sudo');
       }
+      cmdString = actionCommand(policyConfig, options.action);
+    } else {
+      assertUnrestricted(policyConfig, 'Arbitrary command execution');
     }
 
+    if ([cmdString, options.script, options.steps].filter(value => value !== undefined).length !== 1) {
+      invalid("Exactly one of command, script or steps must be provided.");
+    }
+    for (const [label, value] of [['command', cmdString], ['script', options.script]]) {
+      if (value !== undefined && (!value.length || value.includes('\0'))) {
+        invalid(`${label} must be non-empty and contain no NUL bytes`);
+      }
+    }
+    if (options.interpreter !== undefined && !['bash', 'sh', 'python3'].includes(options.interpreter)) {
+      invalid("interpreter must be bash, sh or python3");
+    }
+    if (options.interpreter === "python3" && options.steps !== undefined) {
+      invalid("python3 is only supported with script; steps requires bash or sh");
+    }
+    if (options.interpreter === "python3" && options.failFast !== undefined) {
+      invalid("failFast is only supported with shell scripts; Python exits on uncaught exceptions automatically");
+    }
+    if (options.steps !== undefined && (
+      !Array.isArray(options.steps) || !options.steps.length ||
+      options.steps.some(step => typeof step !== 'string' || !step.length || step.includes('\0'))
+    )) {
+      invalid("steps must be a non-empty array of non-empty strings without NUL bytes");
+    }
+    if (options.failFast !== undefined && options.script === undefined) {
+      invalid("failFast is only supported with script; use stopOnError with steps");
+    }
+    if (options.stopOnError !== undefined && options.steps === undefined) {
+      invalid("stopOnError is only supported with steps");
+    }
+    if (options.interpreter !== undefined && cmdString !== undefined) {
+      invalid("interpreter is only supported with script or steps");
+    }
+    for (const [key, value] of Object.entries(options.env || {})) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || typeof value !== 'string' || value.includes('\0')) {
+        invalid("Invalid environment variable");
+      }
+    }
+    const files: Record<string, string> = Object.create(null);
+    for (const [key, file] of Object.entries(options.envFromRemoteFiles || {})) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+        invalid("Invalid environment variable name in envFromRemoteFiles");
+      }
+      if (Object.hasOwn(options.env || {}, key)) {
+        invalid(`Environment variable ${key} is defined in both env and envFromRemoteFiles`);
+      }
+      if (typeof file !== 'string' || !file.startsWith('/')) {
+        invalid("envFromRemoteFiles requires absolute POSIX paths");
+      }
+      files[key] = this.validateRemotePath(file, name);
+    }
+    const script = options.steps !== undefined
+      ? buildStepsScript(options.steps, options.stopOnError ?? true, this.executionContext.getStore()?.stepToken)
+      : options.script;
+    options = { ...options, script, envFromRemoteFiles: files };
     const key = name || this.defaultName;
     const config = this.getConfig(name);
-    const transportMode = this.getTransportMode(config);
+    const transportMode = this.jobReadContext.getStore() ? "exec" : this.getTransportMode(config);
+    if ((script !== undefined || Object.keys(files).length) && transportMode === "shell") {
+      throw new ToolError("UNSUPPORTED_IN_SHELL_MODE", "script, steps and envFromRemoteFiles require exec transport.", false);
+    }
+
+    if (!options.prevalidatedInternalCommand) {
+      const hasWhitelist = (this.commandWhitelistRegexes.get(key)?.length ?? 0) > 0;
+      const hasFilters = hasWhitelist || (this.commandBlacklistRegexes.get(key)?.length ?? 0) > 0;
+      if (hasFilters && options.resourceKey !== undefined) invalid('resourceKey is unavailable with command filters');
+      // Environment and elevation can change what an otherwise permitted
+      // command executes. A regex on the original text cannot authorize them.
+      if (hasFilters && (options.sudo || Object.keys(options.env || {}).length || Object.keys(files).length)) {
+        invalid("env, sudo and envFromRemoteFiles are not supported when command filters are configured");
+      }
+      if (script !== undefined && hasWhitelist) {
+        invalid("script/steps mode is not supported when commandWhitelist is configured");
+      }
+      const validationTargets = script === undefined ? [cmdString!] : [scriptInterpreterCommand(options), script];
+      for (const validationTarget of validationTargets) {
+        const validationResult = this.validateCommand(validationTarget, name);
+        if (!validationResult.isAllowed) {
+          invalid(`Command validation failed: ${validationResult.reason}`);
+        }
+      }
+    }
+    const executionContext = this.executionContext.getStore();
+    if (executionContext) executionContext.phase = 'preparation';
+    // Only resolve metadata over SFTP. Secret contents never enter this process.
+    if (Object.keys(files).length && config.allowedRemotePaths?.length) {
+      await this.withSftp(name, async sftp => {
+        for (const [key, file] of Object.entries(files)) {
+          files[key] = await this.resolveRemotePath(sftp, file, name);
+        }
+      });
+    }
+
     const timeout =
       options.timeout ??
       (transportMode === "shell"
         ? this.getShellCommandTimeoutMs(config)
         : this.getCommandTimeoutMs(config));
     const connectionTimeoutMs = this.getConnectionTimeoutMs(config);
+    if (executionContext) executionContext.phase = 'connection';
     const client = await this.withTimeout(
-      this.ensureConnected(name),
+      this.ensureConnected(key),
       connectionTimeoutMs,
       () => this.invalidateConnection(key),
       `SSH connection [${key}] timed out after ${connectionTimeoutMs}ms`,
     );
 
+    if (executionContext) executionContext.phase = 'validation';
+    this.assertExecutionConfigUnchanged(key, config);
+    if (executionContext) executionContext.phase = 'channel_open';
     if (transportMode === "shell") {
-      return this.runShellCommand(cmdString, directory, name, timeout);
+      const commandToRun = applyEnvironmentAndSudo(
+        withResourceLock(cmdString!, options.resourceKey),
+        options.env,
+        options.sudo,
+      );
+      return this.runShellCommand(commandToRun, directory, key, timeout);
     }
 
     return this.runExecCommand(
@@ -2340,27 +2706,45 @@ export class SSHConnectionManager {
       directory,
       timeout,
       key,
+      options,
     );
+  }
+
+  /** Authorization must still hold after async setup and shared-shell queuing. */
+  private assertExecutionConfigUnchanged(key: string, expected: SSHConfig): void {
+    if (!isDeepStrictEqual(this.configs[key], expected)) {
+      throw new ToolError("EXECUTION_POLICY_DENIED", "Connection configuration changed before command dispatch. Review the current policy before retrying.");
+    }
   }
 
   private runExecCommand(
     client: Client,
     config: SSHConfig,
-    cmdString: string,
+    cmdString: string | undefined,
     directory: string | undefined,
     timeout: number,
     key: string,
+    options: RunCommandOptions,
   ): Promise<string> {
-    let commandToRun = directory
-      ? `cd -- ${shellQuote(directory)} && ${cmdString}`
-      : cmdString;
+    const execution = this.executionContext.getStore();
+    const result = execution?.result;
+    const stepDecoder = options.steps && execution ? new StepEventDecoder(execution.stepToken, execution.result) : undefined;
+    const scriptMode = options.script !== undefined;
+    let commandToRun = scriptMode ? scriptInterpreterCommand(options) : cmdString!;
+    if (directory) commandToRun = `cd -- ${shellQuote(directory)} && ${commandToRun}`;
+    commandToRun = withResourceLock(commandToRun, options.resourceKey);
+    commandToRun = applyEnvironmentAndSudo(commandToRun, options.env, options.sudo, options.envFromRemoteFiles);
+    // Isolate secret exports from the login shell and suppress terminal echo.
+    if (!options.sudo && Object.keys(options.envFromRemoteFiles || {}).length) {
+      commandToRun = `sh -c ${shellQuote(commandToRun)}`;
+    }
 
     if (config.commandTemplate) {
       commandToRun = applyCommandTemplate(config.commandTemplate, commandToRun);
     }
 
     const maxOutputBytes = this.getMaxOutputBytes(config);
-    const reportOutput = this.activity?.log.outputReporter();
+    const reportOutput = this.jobReadContext.getStore() ? undefined : this.activity?.log.outputReporter();
 
     return new Promise<string>((resolve, reject) => {
       let openTimeoutId: NodeJS.Timeout | undefined;
@@ -2378,7 +2762,13 @@ export class SSHConnectionManager {
 
       client.exec(
         commandToRun,
-        { pty: config.pty !== undefined ? config.pty : true },
+        {
+          pty: this.jobReadContext.getStore() || options.action !== undefined || scriptMode || Object.keys(options.envFromRemoteFiles || {}).length > 0
+            ? false
+            : config.pty !== undefined
+              ? config.pty
+              : true,
+        },
         (err: Error | undefined, stream: ClientChannel) => {
           if (openTimeoutId) {
             clearTimeout(openTimeoutId);
@@ -2407,6 +2797,8 @@ export class SSHConnectionManager {
             return;
           }
 
+          if (result) result.started = true;
+          if (execution) execution.phase = 'execution';
           let data = "";
           let errorData = "";
           let exitCode: number | undefined;
@@ -2458,6 +2850,8 @@ export class SSHConnectionManager {
                     .filter(Boolean)
                     .join("\n"),
                   false,
+                  false,
+                  `[truncated] Output exceeded maxOutputBytes=${maxOutputBytes}; the command was aborted.`,
                 ),
               );
               return;
@@ -2473,13 +2867,18 @@ export class SSHConnectionManager {
           };
 
           stream.on("data", (chunk: Buffer) => appendChunk(chunk, false));
-          stream.stderr.on("data", (chunk: Buffer) => appendChunk(chunk, true));
+          stream.on('diagnostic', (diagnostic: ExecutionResult['transportDiagnostics'][number]) => {
+            if (result && result.transportDiagnostics.length < 32) result.transportDiagnostics.push(diagnostic);
+          });
+          stream.stderr.on("data", (chunk: Buffer) => { if (!settled) appendChunk(stepDecoder ? stepDecoder.write(chunk) : chunk, true); });
 
           stream.on(
             "exit",
             (code: number | undefined, signal: string | undefined) => {
-              exitCode = code;
-              exitSignal = signal;
+              if (settled) return;
+              exitCode = typeof code === "number" && Number.isInteger(code) ? code : undefined;
+              exitSignal = typeof signal === "string" && signal ? signal : undefined;
+              if (result) { result.exitCode = exitCode ?? null; result.signal = exitSignal || null; }
             },
           );
 
@@ -2488,19 +2887,31 @@ export class SSHConnectionManager {
             if (settled) {
               return;
             }
+            if (stepDecoder) appendChunk(stepDecoder.end(), true);
+            if (settled) return;
             settled = true;
 
-            if (exitCode === undefined) {
+            if (exitCode === undefined && typeof code === "number" && Number.isInteger(code)) {
               exitCode = code;
             }
 
-            if (!exitSignal && signal) {
+            if (!exitSignal && typeof signal === "string" && signal) {
               exitSignal = signal;
             }
 
+            if (result) { result.completed = exitCode !== undefined || !!exitSignal; result.exitCode = exitCode ?? null; result.signal = exitSignal || null; }
             // Flush any trailing incomplete multi-byte sequence.
-            const stdout = (data + stdoutDecoder.end()).trimEnd();
+            const rawStdout = data + stdoutDecoder.end();
+            const stdout = rawStdout.trimEnd();
             const stderr = (errorData + stderrDecoder.end()).trimEnd();
+
+            if (exitCode === undefined && !exitSignal) {
+              const notice = "[unknown status] Command channel closed without an exit status; completion is unknown.";
+              reject(new ToolError("COMMAND_EXECUTION_ERROR",
+                [this.formatCommandSuccess(stdout, stderr), notice].filter(Boolean).join("\n"),
+                false, false, notice));
+              return;
+            }
 
             const hasNonZeroExitCode =
               exitCode !== undefined && exitCode !== 0;
@@ -2524,24 +2935,30 @@ export class SSHConnectionManager {
                       : `Command failed with exit code ${exitCode}`),
                   false,
                   true,
+                  this.formatCommandFailure("", "", exitCode, exitSignal),
                 ),
               );
               return;
             }
 
-            resolve(this.formatCommandSuccess(stdout, stderr));
+            resolve(this.jobReadContext.getStore() ? rawStdout : this.formatCommandSuccess(stdout, stderr));
           });
 
           stream.on("error", (streamError: Error) => {
+            if (settled) return;
             cleanup();
             settled = true;
+            const notice = `Stream error: ${streamError.message}`;
             reject(
               new ToolError(
                 "COMMAND_EXECUTION_ERROR",
-                `Stream error: ${streamError.message}`,
+                [this.formatCommandSuccess(data.trimEnd(), errorData.trimEnd()), notice].filter(Boolean).join("\n"),
                 true,
+                false,
+                notice,
               ),
             );
+            try { stream.close(); } catch { /* Preserve the original stream failure. */ }
           });
 
           commandTimeoutId = setTimeout(() => {
@@ -2570,9 +2987,18 @@ export class SSHConnectionManager {
                   .filter(Boolean)
                   .join("\n"),
                 true,
+                false,
+                `[timeout] Command timed out after ${timeout}ms`,
               ),
             );
           }, timeout);
+
+          if (scriptMode) {
+            stream.end(options.script);
+          } else if (options.action !== undefined) {
+            // Actions expose no input channel. Deliver EOF for programs that read stdin.
+            stream.end();
+          }
         },
       );
 
@@ -2585,6 +3011,8 @@ export class SSHConnectionManager {
               "COMMAND_TIMEOUT",
               `[timeout] Command channel did not open within ${timeout}ms`,
               true,
+              false,
+              `[timeout] Command channel did not open within ${timeout}ms`,
             ),
           );
         }
@@ -2806,9 +3234,11 @@ export class SSHConnectionManager {
     timeout: number,
   ): Promise<string> {
     const key = name || this.defaultName;
-    return this.enqueueShellCommand(key, () =>
-      this.executeShellCommand(key, cmdString, directory, timeout),
-    );
+    const config = this.getConfig(key);
+    return this.enqueueShellCommand(key, () => {
+      this.assertExecutionConfigUnchanged(key, config);
+      return this.executeShellCommand(key, cmdString, directory, timeout);
+    });
   }
 
   private enqueueShellCommand<T>(
@@ -2842,12 +3272,13 @@ export class SSHConnectionManager {
       );
     }
 
+    const result = this.executionContext.getStore()?.result;
     const commandId = this.generateMarkerId("command");
     const config = this.getConfig(key);
     const script = this.buildShellCommandScript(commandId, cmdString, directory, config.commandTemplate);
 
     const maxOutputBytes = this.getMaxOutputBytes(config);
-    const reportOutput = this.activity?.log.outputReporter();
+    const reportOutput = this.jobReadContext.getStore() ? undefined : this.activity?.log.outputReporter();
 
     return new Promise<string>((resolve, reject) => {
       let settled = false;
@@ -2906,6 +3337,8 @@ export class SSHConnectionManager {
               "OUTPUT_LIMIT_EXCEEDED",
               `[truncated] Output exceeded maxOutputBytes=${maxOutputBytes}; the command was aborted.`,
               false,
+              false,
+              `[truncated] Output exceeded maxOutputBytes=${maxOutputBytes}; the command was aborted.`,
             ),
           );
           return;
@@ -2916,6 +3349,7 @@ export class SSHConnectionManager {
           return;
         }
 
+        if (result) { result.completed = true; result.exitCode = matched.exitCode; }
         this.shellBuffers.set(key, matched.remainder);
         const output = this.stripLeadingBeginMarker(
           this.cleanShellOutput(matched.output),
@@ -2930,6 +3364,7 @@ export class SSHConnectionManager {
                 `Command failed with exit code ${matched.exitCode}`,
               false,
               true,
+              this.formatCommandFailure("", "", matched.exitCode),
             ),
           );
           return;
@@ -2974,10 +3409,13 @@ export class SSHConnectionManager {
             "COMMAND_TIMEOUT",
             `[timeout] Command timed out after ${timeout}ms`,
             true,
+            false,
+            `[timeout] Command timed out after ${timeout}ms`,
           ),
         );
       }, timeout);
 
+      if (result) result.started = true;
       stream.write(script);
       resolveIfComplete();
     });

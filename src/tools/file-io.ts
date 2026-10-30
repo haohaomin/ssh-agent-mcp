@@ -27,7 +27,7 @@ export function registerFileIoTools(server: McpServer): void {
     } catch(e) { return errorResult(e); }
   });
   server.registerTool('ssh_file_write', {
-    description: 'Write UTF-8 text using mode=create (exclusive, default), overwrite, or append. Parent directory must exist.',
+    description: 'Write UTF-8 text using mode=create (exclusive, default), overwrite, or append. Parent directory must exist. For an existing local file, use ssh_upload(localPath, remotePath) without reading its contents into the conversation.',
     inputSchema: { remotePath, connectionName, content: z.string().max(4*1024*1024), mode: z.enum(['create','overwrite','append']).default('create'), permissions: z.number().int().min(0).max(0o777).optional() }
   }, async a => {
     try {

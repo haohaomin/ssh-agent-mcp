@@ -1,3 +1,4 @@
+import { redactValue } from '../utils/output-redaction.js';
 import { ActivityMonitor } from "../services/activity-monitor.js";
 import { z } from "zod";
 import { diagnoseConnection } from "../tools/maintenance.js";
@@ -16,7 +17,7 @@ const MIME: Record<string, string> = {
 };
 
 function json(res: ServerResponse, status: number, value: unknown): void {
-  const body = JSON.stringify(value);
+  const body = JSON.stringify(redactValue(value));
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Content-Length": Buffer.byteLength(body), "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" });
   res.end(body);
 }
@@ -116,7 +117,7 @@ export class WebUi {
       return this.manager.activity!.log.run(operation, 'web', args, connectionName, work,
         (id, result) => this.manager.activity?.observe(id, operation, args, result));
     };
-    const connection = z.object({ connectionName: z.string().min(1).optional() });
+    const connection = z.object({ connectionName: z.string().min(1).optional().transform(value => this.manager.resolveConnectionName(value)) });
     const readBody = async <T extends z.ZodType>(schema: T): Promise<z.infer<T>> => schema.parse(await body(req));
     const name = url.searchParams.get("connectionName") || undefined;
     const string = z.string().min(1);
@@ -197,7 +198,7 @@ export class WebUi {
     }
     if (suffix === "/api/file" && req.method === "GET") return json(res, 200, await perform('web_file_read', { remotePath: string.parse(url.searchParams.get('path')), connectionName: name }, () => this.files.readText(string.parse(url.searchParams.get('path')), name)));
     if (suffix === "/api/file/edit" && req.method === "POST") {
-      const data = await readBody(connection.extend({ remotePath: string, content: z.string(), expectedSha256: sha, dryRun: z.boolean().optional(), backup: z.boolean().optional() }));
+      const data = await readBody(connection.extend({ remotePath: string, content: z.string(), expectedSha256: sha, writeMode: z.enum(['atomic','inPlace']).optional(), dryRun: z.boolean().optional(), backup: z.boolean().optional() }));
       return json(res, 200, await perform('web_file_edit', data, () => this.files.replace(data.remotePath, data.content, data.expectedSha256, data.connectionName, data)));
     }
     if (suffix === "/api/file/create" && req.method === "POST") {

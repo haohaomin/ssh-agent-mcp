@@ -1,3 +1,4 @@
+import { assertUnrestricted } from '../utils/execution-policy.js';
 import net from 'node:net';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -8,6 +9,7 @@ import { shellQuote } from '../utils/shell.js';
 import type { SSHConnectionManager } from './ssh-connection-manager.js';
 export type SyncOptions = { deleteExtra?: boolean; compress?: boolean; preservePermissions?: boolean; timeoutMs?: number; extraArgs?: string[] };
 export async function rsyncTransfer(manager: SSHConnectionManager, localPath: string, remotePath: string, direction: 'upload'|'download', dryRun: boolean, name?: string, exclude: string[] = [], options: SyncOptions = {}) {
+  assertUnrestricted(manager.getConfig(name), 'Rsync');
   const local = manager.validateLocalPath(localPath,name,direction==='upload'?'read':'write');
   const remote = manager.validateRemotePath(remotePath,name);
   const config = manager.getConfig(name);

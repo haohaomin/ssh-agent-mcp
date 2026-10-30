@@ -1,4 +1,8 @@
 export type ToolErrorCode =
+  | "RESOURCE_BUSY"
+  | "CONNECTION_REQUIRED"
+  | "CONNECTION_NOT_FOUND"
+  | "EXECUTION_POLICY_DENIED"
   | "COMMAND_VALIDATION_FAILED"
   | "COMMAND_EXECUTION_ERROR"
   | "OUTPUT_LIMIT_EXCEEDED"
@@ -26,6 +30,8 @@ export class ToolError extends Error {
      * failure of this tool.
      */
     public readonly commandRan: boolean = false,
+    /** Trusted transport status kept outside any output truncation budget. */
+    public readonly resultSuffix: string = "",
   ) {
     super(message);
     this.name = "ToolError";
@@ -44,5 +50,13 @@ export function toToolError(
     return new ToolError(fallbackCode, error.message, false);
   }
 
+  if (error && typeof error === "object") {
+    // Error-like objects from transports are often not instances of Error.
+    // Select diagnostic fields rather than serializing requests or credentials.
+    const value = error as Record<string, unknown>;
+    const parts = [value.message, value.code, value.level, value.syscall]
+      .filter((item): item is string => typeof item === 'string' && item.length > 0);
+    return new ToolError(fallbackCode, parts.join(' | ') || 'Unknown error object (no diagnostic fields)', false);
+  }
   return new ToolError(fallbackCode, String(error), false);
 }

@@ -25,9 +25,9 @@ for(const backend of ['ssh2','openssh']) test(`MCP request-boundary regressions 
   const makeClient=async()=>{const client=new Client({name:'request-test',version:'1'});clients.push(client);await client.connect(new StreamableHTTPClientTransport(new URL(endpoint)));return client;};
   const [a,b]=await Promise.all([makeClient(),makeClient()]);
   const text=result=>result.content.map(c=>c.text||'').join('\n');
-  const invoke=(client,name,args={})=>client.callTool({name,arguments:args});
+  const invoke=(client,name,args={})=>client.callTool({name,arguments:{connectionName:'fixture',...args}});
   try {
-    await t.test('independent requests cannot both commit the same preview, including default-name and symlink aliases',async()=>{
+    await t.test('independent requests cannot both commit the same preview, including explicit connection and symlink aliases',async()=>{
       const file=path.join(allowed,'edit.txt'),alias=path.join(allowed,'alias.txt');fs.writeFileSync(file,'old');fs.symlinkSync(file,alias);
       const expectedSha256=createHash('sha256').update('old').digest('hex');
       const original=manager.withSftp.bind(manager);
@@ -47,8 +47,9 @@ for(const backend of ['ssh2','openssh']) test(`MCP request-boundary regressions 
         assert.deepEqual(fs.readdirSync(allowed).sort(),['alias.txt','edit.txt']);
       }finally{manager.withSftp=original;}
     });
-    await t.test('session ensure treats omitted and explicit default connection names identically',async()=>{
+    await t.test('session ensure reuses an explicitly selected connection and rejects ambiguous omission',async()=>{
       const name='mcp-default-'+backend;
+      const missing=await a.callTool({name:'ssh_session_start',arguments:{sessionName:name}});assert(missing.isError);assert.equal(JSON.parse(text(missing)).code,'CONNECTION_REQUIRED');
       try{
         const started=await invoke(a,'ssh_session_start',{sessionName:name});assert.ok(!started.isError,text(started));
         const ensured=await invoke(b,'ssh_session_ensure',{sessionName:name,connectionName:'fixture'});assert.ok(!ensured.isError,text(ensured));

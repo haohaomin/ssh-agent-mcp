@@ -1,3 +1,4 @@
+import { executionPolicySchema } from '../utils/execution-policy.js';
 import { importOpenSsh } from "../utils/openssh-import.js";
 import { parseArgs } from "node:util";
 import { SSHConfig, SshConnectionConfigMap, ParsedArgs, McpTransport } from "../models/types.js";
@@ -608,6 +609,9 @@ export class CommandLineParser {
     }
 
     return {
+      redactLocalFiles: config.redactLocalFiles,
+      redactEnv: config.redactEnv,
+      executionPolicy: config.executionPolicy === undefined ? undefined : executionPolicySchema.parse(config.executionPolicy),
       name: config.name,
       backend: config.backend,
       nativeTarget: config.nativeTarget,

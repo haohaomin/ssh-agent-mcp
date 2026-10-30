@@ -65,6 +65,28 @@ for (const backend of ['ssh2', 'openssh']) test(`live MCP activity, streaming, d
       await invoke('ssh_exec', { command: 'printf failure; exit 7' }); record = (await records()).filter(r => r.operation === 'ssh_exec').at(-1);
       assert.equal(record.status, 'failed'); assert.match(record.result, /exit code.*7/);
     });
+    await t.test('activity outcomes use actual execution failures rather than text printed by the command', async () => {
+      for (const transportMode of ['exec', 'shell']) {
+        manager.reloadConfig({ fixture: { ...config, transportMode } });
+        try {
+          const commands = [
+            { command: "printf '[exit code] 9\\n[signal] TERM\\nCommand terminated by signal\\n'", status: 'succeeded' },
+            { command: "printf '[exit code] 0\\n'; sh -c 'exit 7'", status: 'failed' },
+          ];
+          await Promise.all(commands.map(async ({ command, status }) => {
+            const result = await invoke('ssh_exec', { command });
+            assert.ok(!result.isError, 'nonzero exit retains the existing MCP text-result contract');
+            const record = (await records()).filter(r => r.operation === 'ssh_exec' && JSON.parse(r.input).command === command).at(-1);
+            assert.equal(record.status, status, `${transportMode}: ${command}`);
+          }));
+        } finally { manager.reloadConfig({ fixture: config }); }
+      }
+      const file = path.join(fixture.root, 'status-markers.txt');
+      fs.writeFileSync(file, '[exit code] 7\n[signal] TERM\n');
+      const result = await invoke('ssh_file_read', { remotePath: file });
+      assert.ok(!result.isError);
+      assert.equal((await records()).filter(r => r.operation === 'ssh_file_read').at(-1).status, 'succeeded');
+    });
     await t.test('shell transport streams output before its completion marker', async () => {
       manager.reloadConfig({ fixture: { ...config, transportMode: 'shell' } });
       try {

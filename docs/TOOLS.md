@@ -1,6 +1,6 @@
 # MCP 工具参考
 
-由 `npm run docs:tools` 从实际工具定义生成。共 31 个工具。参数统一使用 camelCase，时间单位为毫秒，偏移明确区分字节和字符。
+由 `npm run docs:tools` 从实际工具定义生成。共 33 个工具。参数统一使用 camelCase，时间单位为毫秒，偏移明确区分字节和字符。
 
 ## ssh_config_reload
 
@@ -29,7 +29,7 @@ List a remote directory via SFTP without downloading file contents. Does not tra
       "description": "Absolute remote path"
     },
     "connectionName": {
-      "description": "Configured connection name; defaults to the first configured connection",
+      "description": "Configured connection name. Required when multiple connections exist; may be omitted only for a single connection",
       "type": "string",
       "minLength": 1
     },
@@ -68,7 +68,7 @@ Download a file, or a whole remote directory (recursively; symlinks skipped, max
       "description": "Local path"
     },
     "connectionName": {
-      "description": "Configured connection name; defaults to the first configured connection",
+      "description": "Configured connection name. Required when multiple connections exist; may be omitted only for a single connection",
       "type": "string",
       "minLength": 1
     }
@@ -82,13 +82,23 @@ Download a file, or a whole remote directory (recursively; symlinks skipped, max
 
 ## ssh_exec
 
-Execute command on connected server and get output result. A non-zero exit code is returned as the command's output followed by '[exit code] N' (not as a tool error).
+Execute a command, a multiline script via stdin, or ordered steps on a connected server. Supports noninteractive sudo, remote-file environment injection and bounded head/tail output. Use ssh_upload for existing local files. Returns structuredContent with exitCode, signal, timedOut, steps and output log metadata, plus legacy text. On actions-only connections use action (fixed administrator-defined executable and arguments); other execution/file/session/forwarding channels are disabled. Unrestricted execution has the SSH account's privileges; regex filters and path checks are not a sandbox. A non-zero exit code is returned as the command's output followed by '[exit code] N' (not as a tool error).
 
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "properties": {
+    "resourceKey": {
+      "description": "Cooperative remote account lock; requires flock. Same key serializes participating exec/jobs across MCP processes. Nonblocking conflict exits 75. Unavailable with actions-only or command filters.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.:-]{1,100}$"
+    },
+    "action": {
+      "description": "Administrator-defined action name on an actions-only connection. Mutually exclusive with command/script/steps and execution overrides. See ssh_server_list for available actions.",
+      "type": "string",
+      "minLength": 1
+    },
     "env": {
       "type": "object",
       "propertyNames": {
@@ -99,17 +109,72 @@ Execute command on connected server and get output result. A non-zero exit code 
         "type": "string"
       }
     },
+    "envFromRemoteFiles": {
+      "description": "Environment variable to absolute remote text-file path. Values are read only remotely; trailing newlines are removed. Requires exec transport. Do not print secrets or enable shell tracing.",
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "format": "starts_with",
+        "pattern": "^\\/.*"
+      }
+    },
     "command": {
+      "description": "Command to execute. Provide exactly one of command, script or steps.",
       "type": "string",
-      "minLength": 1,
-      "description": "Command to execute"
+      "minLength": 1
+    },
+    "script": {
+      "description": "Script sent verbatim to bash, sh or python3 stdin. Requires exec transport. For shell scripts use failFast; Python exits on uncaught exceptions automatically.",
+      "type": "string",
+      "minLength": 1
+    },
+    "steps": {
+      "description": "Ordered shell steps sharing cwd and variables. Each step reports its number and exit code. Requires exec transport.",
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "stopOnError": {
+      "description": "Stop steps on the first error (default: true). If false, continue and return the first failed step's status. Explicit exit/exec can end the shell.",
+      "type": "boolean"
+    },
+    "failFast": {
+      "description": "Shell script only: enable errexit, plus pipefail for bash (default: false). Omit for python3; normal shell errexit exceptions apply.",
+      "type": "boolean"
+    },
+    "interpreter": {
+      "description": "Script interpreter (default: bash). python3 runs unbuffered from stdin and must be installed remotely. steps supports only bash/sh.",
+      "type": "string",
+      "enum": [
+        "bash",
+        "sh",
+        "python3"
+      ]
+    },
+    "sudo": {
+      "description": "Run through sudo -n -- sh -c. Requires passwordless permission to run the wrapper shell. env/sudo/remote-file injection are unavailable on connections with command filters.",
+      "type": "boolean"
+    },
+    "maxBytes": {
+      "default": 65536,
+      "description": "Output payload budget in bytes (default: 65536); status and truncation notices are outside this budget. Keeps a UTF-8-safe head/tail and attempts to save full captured output locally. The connection's maxOutputBytes is a separate hard capture limit.",
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
     },
     "cwd": {
       "description": "Working directory for command execution",
       "type": "string"
     },
     "connectionName": {
-      "description": "Configured connection name; defaults to the first configured connection",
+      "description": "Configured connection name. Required when multiple connections exist; may be omitted only for a single connection",
       "type": "string",
       "minLength": 1
     },
@@ -119,16 +184,554 @@ Execute command on connected server and get output result. A non-zero exit code 
       "exclusiveMinimum": 0,
       "maximum": 9007199254740991
     }
+  }
+}
+```
+
+结构化返回（structuredContent）：
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "connectionName": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "failureStage": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "validation",
+            "preparation",
+            "connection",
+            "channel_open",
+            "execution"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "transportDiagnostics": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string",
+            "const": "openssh"
+          },
+          "kind": {
+            "type": "string",
+            "const": "shared_connection_closed"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "kind",
+          "message"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "output": {
+      "type": "string"
+    },
+    "started": {
+      "type": "boolean"
+    },
+    "completed": {
+      "type": "boolean"
+    },
+    "exitCode": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "signal": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "timedOut": {
+      "type": "boolean"
+    },
+    "truncated": {
+      "type": "boolean"
+    },
+    "captureLimitExceeded": {
+      "type": "boolean"
+    },
+    "fullOutputPath": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "outputStorageError": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "index": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "not_started",
+              "running",
+              "succeeded",
+              "failed",
+              "skipped",
+              "unknown"
+            ]
+          },
+          "exitCode": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "index",
+          "status",
+          "exitCode"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "error": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "retriable": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "retriable"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
   },
   "required": [
-    "command"
+    "connectionName",
+    "failureStage",
+    "transportDiagnostics",
+    "output",
+    "started",
+    "completed",
+    "exitCode",
+    "signal",
+    "timedOut",
+    "truncated",
+    "captureLimitExceeded",
+    "fullOutputPath",
+    "outputStorageError",
+    "steps",
+    "error"
+  ],
+  "additionalProperties": false
+}
+```
+
+## ssh_exec_many
+
+Run the same command/script/steps/action on 1–16 explicitly named connections with bounded concurrency. Returns ordered per-host structured results, separate exit codes and full log paths. No fallback target and no automatic retries or rollback. Use concurrency=1 for serial runs; all targets are attempted. Text is a compact summary; full output is in structuredContent.results.
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "resourceKey": {
+      "description": "Cooperative remote account lock; requires flock. Same key serializes participating exec/jobs across MCP processes. Nonblocking conflict exits 75. Unavailable with actions-only or command filters.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.:-]{1,100}$"
+    },
+    "action": {
+      "description": "Administrator-defined action name on an actions-only connection. Mutually exclusive with command/script/steps and execution overrides. See ssh_server_list for available actions.",
+      "type": "string",
+      "minLength": 1
+    },
+    "env": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+      },
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "envFromRemoteFiles": {
+      "description": "Environment variable to absolute remote text-file path. Values are read only remotely; trailing newlines are removed. Requires exec transport. Do not print secrets or enable shell tracing.",
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "format": "starts_with",
+        "pattern": "^\\/.*"
+      }
+    },
+    "command": {
+      "description": "Command to execute. Provide exactly one of command, script or steps.",
+      "type": "string",
+      "minLength": 1
+    },
+    "script": {
+      "description": "Script sent verbatim to bash, sh or python3 stdin. Requires exec transport. For shell scripts use failFast; Python exits on uncaught exceptions automatically.",
+      "type": "string",
+      "minLength": 1
+    },
+    "steps": {
+      "description": "Ordered shell steps sharing cwd and variables. Each step reports its number and exit code. Requires exec transport.",
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "stopOnError": {
+      "description": "Stop steps on the first error (default: true). If false, continue and return the first failed step's status. Explicit exit/exec can end the shell.",
+      "type": "boolean"
+    },
+    "failFast": {
+      "description": "Shell script only: enable errexit, plus pipefail for bash (default: false). Omit for python3; normal shell errexit exceptions apply.",
+      "type": "boolean"
+    },
+    "interpreter": {
+      "description": "Script interpreter (default: bash). python3 runs unbuffered from stdin and must be installed remotely. steps supports only bash/sh.",
+      "type": "string",
+      "enum": [
+        "bash",
+        "sh",
+        "python3"
+      ]
+    },
+    "sudo": {
+      "description": "Run through sudo -n -- sh -c. Requires passwordless permission to run the wrapper shell. env/sudo/remote-file injection are unavailable on connections with command filters.",
+      "type": "boolean"
+    },
+    "maxBytes": {
+      "default": 65536,
+      "description": "Output payload budget in bytes (default: 65536); status and truncation notices are outside this budget. Keeps a UTF-8-safe head/tail and attempts to save full captured output locally. The connection's maxOutputBytes is a separate hard capture limit.",
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
+    "cwd": {
+      "description": "Working directory for command execution",
+      "type": "string"
+    },
+    "timeoutMs": {
+      "description": "Command execution timeout in milliseconds (optional; overrides the connection's commandTimeoutMs or shellCommandTimeoutMs, which defaults to 30000ms)",
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
+    "targets": {
+      "minItems": 1,
+      "maxItems": 16,
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "concurrency": {
+      "default": 4,
+      "description": "Maximum active targets; use 1 for serial execution. Every target runs even if another fails.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 8
+    },
+    "maxTotalBytes": {
+      "default": 65536,
+      "description": "Aggregate output payload budget, divided equally between targets. Per-target maxBytes also applies. Metadata and notices are additional.",
+      "type": "integer",
+      "minimum": 16,
+      "maximum": 1048576
+    }
+  },
+  "required": [
+    "targets"
   ]
+}
+```
+
+结构化返回（structuredContent）：
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "connectionName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "failureStage": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "validation",
+                  "preparation",
+                  "connection",
+                  "channel_open",
+                  "execution"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "transportDiagnostics": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "source": {
+                  "type": "string",
+                  "const": "openssh"
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "shared_connection_closed"
+                },
+                "message": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "source",
+                "kind",
+                "message"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "output": {
+            "type": "string"
+          },
+          "started": {
+            "type": "boolean"
+          },
+          "completed": {
+            "type": "boolean"
+          },
+          "exitCode": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "signal": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "timedOut": {
+            "type": "boolean"
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "captureLimitExceeded": {
+            "type": "boolean"
+          },
+          "fullOutputPath": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "outputStorageError": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "index": {
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "not_started",
+                    "running",
+                    "succeeded",
+                    "failed",
+                    "skipped",
+                    "unknown"
+                  ]
+                },
+                "exitCode": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": -9007199254740991,
+                      "maximum": 9007199254740991
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "index",
+                "status",
+                "exitCode"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "code": {
+                    "type": "string"
+                  },
+                  "message": {
+                    "type": "string"
+                  },
+                  "retriable": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "code",
+                  "message",
+                  "retriable"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "connectionName",
+          "failureStage",
+          "transportDiagnostics",
+          "output",
+          "started",
+          "completed",
+          "exitCode",
+          "signal",
+          "timedOut",
+          "truncated",
+          "captureLimitExceeded",
+          "fullOutputPath",
+          "outputStorageError",
+          "steps",
+          "error"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "succeeded": {
+      "type": "integer",
+      "minimum": -9007199254740991,
+      "maximum": 9007199254740991
+    },
+    "failed": {
+      "type": "integer",
+      "minimum": -9007199254740991,
+      "maximum": 9007199254740991
+    }
+  },
+  "required": [
+    "results",
+    "succeeded",
+    "failed"
+  ],
+  "additionalProperties": false
 }
 ```
 
 ## ssh_file_edit
 
-Preview or apply unique exact text replacements. dryRun returns a bounded unified diff and beforeSha256; expectedSha256 rejects stale previews. backup creates an exclusive private sibling copy before atomic replacement. Defaults preserve direct editing.
+Preview or apply unique exact text replacements. dryRun returns a bounded unified diff and beforeSha256; expectedSha256 rejects stale previews. backup creates an exclusive private sibling copy before atomic replacement. writeMode=inPlace preserves the existing inode for single-file bind mounts, requires expectedSha256 and always saves a backup; writes are non-atomic and interrupted writes may be partial. Stop competing writers first. Default is atomic.
 
 ```json
 {
@@ -161,6 +764,14 @@ Preview or apply unique exact text replacements. dryRun returns a bounded unifie
         ]
       }
     },
+    "writeMode": {
+      "default": "atomic",
+      "type": "string",
+      "enum": [
+        "atomic",
+        "inPlace"
+      ]
+    },
     "dryRun": {
       "default": false,
       "type": "boolean"
@@ -174,7 +785,7 @@ Preview or apply unique exact text replacements. dryRun returns a bounded unifie
       "pattern": "^[a-fA-F0-9]{64}$"
     },
     "connectionName": {
-      "description": "Configured connection name; defaults to the first configured connection",
+      "description": "Configured connection name. Required when multiple connections exist; may be omitted only for a single connection",
       "type": "string",
       "minLength": 1
     }
@@ -229,7 +840,7 @@ Find paths with glob stars, globstars, character classes and brace alternatives.
       "type": "boolean"
     },
     "connectionName": {
-      "description": "Configured connection name; defaults to the first configured connection",
+      "description": "Configured connection name. Required when multiple connections exist; may be omitted only for a single connection",
       "type": "string",
       "minLength": 1
     }
@@ -284,7 +895,7 @@ Search UTF-8 files using literal text or bounded JavaScript regular expressions,
       "type": "boolean"
     },
     "connectionName": {
-      "description": "Configured connection name; defaults to the first configured connection",
+      "description": "Configured connection name. Required when multiple connections exist; may be omitted only for a single connection",
       "type": "string",
       "minLength": 1
     },
@@ -345,7 +956,7 @@ Read UTF-8 text over SFTP. Select bytes for byte pagination, or lines for number
       "description": "Absolute remote path"
     },
     "connectionName": {
-      "description": "Configured connection name; defaults to the first configured connection",
+      "description": "Configured connection name. Required when multiple connections exist; may be omitted only for a single connection",
       "type": "string",
       "minLength": 1
     },
@@ -384,9 +995,71 @@ Read UTF-8 text over SFTP. Select bytes for byte pagination, or lines for number
 }
 ```
 
+## ssh_file_transfer
+
+Copy one regular file between two SSH connections through a bounded, backpressured SFTP relay. No local file or file-content tool output. resumable retains partials; retry with transferId verifies the full prefix before appending. Only one writer may own a transferId. Verify destination SHA-256 before atomic publication. Default refuses overwrite; requires OpenSSH hardlink extension (or posix-rename with overwrite=true). A client timeout does not prove publication failed: inspect the destination before retrying.
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "sourceConnectionName": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sourcePath": {
+      "type": "string",
+      "minLength": 1
+    },
+    "destinationConnectionName": {
+      "type": "string",
+      "minLength": 1
+    },
+    "destinationPath": {
+      "type": "string",
+      "minLength": 1
+    },
+    "resumable": {
+      "default": false,
+      "description": "Retain partial temporary file on failure for verified retry",
+      "type": "boolean"
+    },
+    "transferId": {
+      "description": "Retry an interrupted transfer with the same endpoints/paths; verifies the complete existing prefix before append. Requires exclusive ownership of the partial file.",
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "overwrite": {
+      "default": false,
+      "type": "boolean"
+    },
+    "maxBytes": {
+      "default": 268435456,
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 1073741824
+    },
+    "timeoutMs": {
+      "default": 60000,
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 240000
+    }
+  },
+  "required": [
+    "sourceConnectionName",
+    "sourcePath",
+    "destinationConnectionName",
+    "destinationPath"
+  ]
+}
+```
+
 ## ssh_file_write
 
-Write UTF-8 text using mode=create (exclusive, default), overwrite, or append. Parent directory must exist.
+Write UTF-8 text using mode=create (exclusive, default), overwrite, or append. Parent directory must exist. For an existing local file, use ssh_upload(localPath, remotePath) without reading its contents into the conversation.
 
 ```json
 {
@@ -399,7 +1072,7 @@ Write UTF-8 text using mode=create (exclusive, default), overwrite, or append. P
       "description": "Absolute remote path"
     },
     "connectionName": {
-      "description": "Configured connection name; defaults to the first configured connection",
+      "description": "Configured connection name. Required when multiple connections exist; may be omitted only for a single connection",
       "type": "string",
       "minLength": 1
     },
@@ -471,7 +1144,7 @@ Forward a TCP port on the SSH server (loopback by default) to a local destinatio
       "maximum": 65535
     },
     "connectionName": {
-      "description": "Configured connection name; defaults to the first configured connection",
+      "description": "Configured connection name. Required when multiple connections exist; may be omitted only for a single connection",
       "type": "string",
       "minLength": 1
     }
@@ -512,7 +1185,7 @@ Forward a local TCP port (loopback by default) to a destination reachable from t
       "maximum": 65535
     },
     "connectionName": {
-      "description": "Configured connection name; defaults to the first configured connection",
+      "description": "Configured connection name. Required when multiple connections exist; may be omitted only for a single connection",
       "type": "string",
       "minLength": 1
     }
@@ -557,7 +1230,7 @@ Stop a running background job (SIGTERM, then SIGKILL after 5s), including its ch
       "description": "Job id returned by ssh_job_start"
     },
     "connectionName": {
-      "description": "Configured connection name; defaults to the first configured connection",
+      "description": "Configured connection name. Required when multiple connections exist; may be omitted only for a single connection",
       "type": "string",
       "minLength": 1
     }
@@ -584,7 +1257,7 @@ List recent background jobs on the server with their state. Finished jobs are pr
       "maximum": 100
     },
     "connectionName": {
-      "description": "Configured connection name; defaults to the first configured connection",
+      "description": "Configured connection name. Required when multiple connections exist; may be omitted only for a single connection",
       "type": "string",
       "minLength": 1
     }
@@ -601,6 +1274,11 @@ Start a long-running command in the background on the server and return a job id
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "properties": {
+    "resourceKey": {
+      "description": "Remote flock key shared with ssh_exec; contention produces job exit 75, not a retry. Requires flock.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.:-]{1,100}$"
+    },
     "env": {
       "type": "object",
       "propertyNames": {
@@ -612,22 +1290,129 @@ Start a long-running command in the background on the server and return a job id
       }
     },
     "command": {
+      "description": "Command to run in the background; choose command or script",
       "type": "string",
-      "description": "Command to run in the background"
+      "minLength": 1
+    },
+    "script": {
+      "description": "Multiline source saved verbatim in a private remote job file; never executed through a caller-built quoting layer",
+      "type": "string",
+      "minLength": 1
+    },
+    "interpreter": {
+      "type": "string",
+      "enum": [
+        "bash",
+        "sh",
+        "python3"
+      ]
+    },
+    "failFast": {
+      "description": "Shell scripts only; enable errexit and bash pipefail",
+      "type": "boolean"
     },
     "cwd": {
       "description": "Working directory for the command",
       "type": "string"
     },
     "connectionName": {
-      "description": "Configured connection name; defaults to the first configured connection",
+      "description": "Configured connection name. Required when multiple connections exist; may be omitted only for a single connection",
       "type": "string",
       "minLength": 1
     }
+  }
+}
+```
+
+结构化返回（structuredContent）：
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "connectionName": {
+      "type": "string"
+    },
+    "jobId": {
+      "type": "string"
+    },
+    "state": {
+      "type": "string"
+    },
+    "exitCode": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "pid": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "elapsedSeconds": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "offsetBytes": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "nextOffsetBytes": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "totalBytes": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "output": {
+      "type": "string"
+    },
+    "message": {
+      "type": "string"
+    },
+    "remoteLogPath": {
+      "type": "string"
+    },
+    "remoteLogPathBase": {
+      "type": "string"
+    },
+    "nextAction": {
+      "type": "string"
+    },
+    "error": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retriable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retriable"
+      ],
+      "additionalProperties": false
+    }
   },
-  "required": [
-    "command"
-  ]
+  "additionalProperties": false
 }
 ```
 
@@ -663,7 +1448,7 @@ Show state (running/exited/killed/lost), exit code, elapsed time and output of a
       "maximum": 9007199254740991
     },
     "connectionName": {
-      "description": "Configured connection name; defaults to the first configured connection",
+      "description": "Configured connection name. Required when multiple connections exist; may be omitted only for a single connection",
       "type": "string",
       "minLength": 1
     }
@@ -671,6 +1456,98 @@ Show state (running/exited/killed/lost), exit code, elapsed time and output of a
   "required": [
     "jobId"
   ]
+}
+```
+
+结构化返回（structuredContent）：
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "connectionName": {
+      "type": "string"
+    },
+    "jobId": {
+      "type": "string"
+    },
+    "state": {
+      "type": "string"
+    },
+    "exitCode": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "pid": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "elapsedSeconds": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "offsetBytes": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "nextOffsetBytes": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "totalBytes": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "output": {
+      "type": "string"
+    },
+    "message": {
+      "type": "string"
+    },
+    "remoteLogPath": {
+      "type": "string"
+    },
+    "remoteLogPathBase": {
+      "type": "string"
+    },
+    "nextAction": {
+      "type": "string"
+    },
+    "error": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retriable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retriable"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
 }
 ```
 
@@ -684,7 +1561,7 @@ Diagnose one SSH connection without exposing credentials: backend, local depende
   "type": "object",
   "properties": {
     "connectionName": {
-      "description": "Configured connection name; defaults to the first configured connection",
+      "description": "Configured connection name. Required when multiple connections exist; may be omitted only for a single connection",
       "type": "string",
       "minLength": 1
     }
@@ -702,7 +1579,7 @@ Disconnect one server (default if omitted), closing its SSH connection, durable 
   "type": "object",
   "properties": {
     "connectionName": {
-      "description": "Configured connection name; defaults to the first configured connection",
+      "description": "Configured connection name. Required when multiple connections exist; may be omitted only for a single connection",
       "type": "string",
       "minLength": 1
     }
@@ -737,7 +1614,7 @@ Open a persistent interactive SSH terminal, retained by a detached worker across
       "maxLength": 100
     },
     "connectionName": {
-      "description": "Configured connection name; defaults to the first configured connection",
+      "description": "Configured connection name. Required when multiple connections exist; may be omitted only for a single connection",
       "type": "string",
       "minLength": 1
     },
@@ -837,13 +1714,22 @@ Read the complete persisted terminal transcript using byte offsets, including af
 
 ## ssh_session_log_cleanup
 
-Preview or remove logs and metadata for stopped durable sessions whose workers have exited. Dry-run is enabled by default. maxTotalBytes caps retained eligible logs; active workers and unknown state are skipped.
+Preview/remove logs: scope=sessions handles stopped durable sessions whose workers exited; scope=exec handles UUID exec-output logs. Automatic exec retention runs after log writes (7 days/512 MiB, protecting the newest output). Dry-run is enabled by default. maxTotalBytes caps retained eligible logs; active workers and unknown state are skipped.
 
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "properties": {
+    "scope": {
+      "default": "sessions",
+      "description": "sessions preserves existing cleanup; exec previews/deletes UUID exec-output logs",
+      "type": "string",
+      "enum": [
+        "sessions",
+        "exec"
+      ]
+    },
     "maxAgeDays": {
       "default": 30,
       "type": "number",
@@ -944,7 +1830,7 @@ Open a persistent interactive SSH terminal, retained by a detached worker across
       "maxLength": 100
     },
     "connectionName": {
-      "description": "Configured connection name; defaults to the first configured connection",
+      "description": "Configured connection name. Required when multiple connections exist; may be omitted only for a single connection",
       "type": "string",
       "minLength": 1
     },
@@ -1115,7 +2001,7 @@ Synchronize using SFTP or rsync. Rsync supports block-level delta transfer, dele
       }
     },
     "connectionName": {
-      "description": "Configured connection name; defaults to the first configured connection",
+      "description": "Configured connection name. Required when multiple connections exist; may be omitted only for a single connection",
       "type": "string",
       "minLength": 1
     }
@@ -1146,7 +2032,7 @@ Upload a file, or a whole directory (recursively; symlinks skipped, max 2000 fil
       "description": "Remote path (POSIX absolute like /home/user/file.txt, or Windows drive-absolute like C:/Users/file.txt)"
     },
     "connectionName": {
-      "description": "Configured connection name; defaults to the first configured connection",
+      "description": "Configured connection name. Required when multiple connections exist; may be omitted only for a single connection",
       "type": "string",
       "minLength": 1
     }

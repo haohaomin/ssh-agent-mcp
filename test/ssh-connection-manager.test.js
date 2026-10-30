@@ -17,10 +17,17 @@ class FakeExecStream extends EventEmitter {
   constructor() {
     super();
     this.stderr = new EventEmitter();
+    this.writes = [];
+    this.endCalls = [];
   }
 
   close() {
     this.emit('close');
+  }
+
+  end(data) {
+    this.endCalls.push(data);
+    this.writes.push(data);
   }
 }
 

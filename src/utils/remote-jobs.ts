@@ -1,3 +1,4 @@
+import { withResourceLock } from './resource-lock.js';
 import { randomBytes } from "node:crypto";
 import { shellQuote } from "./shell.js";
 
@@ -63,28 +64,38 @@ export function buildJobStartScript(
   jobId: string,
   command: string,
   directory?: string,
+  options: { resourceKey?: string; interpreter?: "bash" | "sh" | "python3"; failFast?: boolean } = {},
 ): string {
   const dir = jobDir(jobId);
+  const interpreter = options.interpreter;
+  const invocation = interpreter === 'python3' ? 'python3 -u "$1/cmd"'
+    : interpreter ? `${interpreter}${options.failFast ? interpreter === 'bash' ? ' -e -o pipefail' : ' -e' : ''} "$1/cmd"` : undefined;
+  const defaultInvocation = 'if command -v bash >/dev/null 2>&1; then bash "$1/cmd"; else sh "$1/cmd"; fi';
+  const wrapper = JOB_WRAPPER.replace(defaultInvocation, `( ${withResourceLock(invocation || defaultInvocation, options.resourceKey)} )`);
   return [
+    '(umask 077',
+
     `J=${dir}`,
-    'mkdir -p "$J" || echo "cannot create $J"',
+    'mkdir -p "${J%/*}" && mkdir "$J" || exit 1',
     // 只按结束标记的时间清理任务，保留仍在运行或刚结束的旧任务。
     `find "${JOB_ROOT}" -mindepth 2 -maxdepth 2 -type f \\( -name exit -o -name killed \\) -mtime +${JOB_RETENTION_DAYS} -exec sh -c ${shellQuote('for marker do job=${marker%/*}; case "${job##*/}" in job-*) rm -rf -- "$job";; esac; done')} sh {} + 2>/dev/null`,
-    `printf '%s\\n' ${shellQuote(command)} > "$J/cmd"`,
-    'date +%s > "$J/started"',
+    `printf '%s\\n' ${shellQuote(command)} > "$J/cmd" || exit 1`,
+    'date +%s > "$J/started" || exit 1',
     'S=""; command -v setsid >/dev/null 2>&1 && S=setsid',
-    `nohup $S sh -c ${shellQuote(JOB_WRAPPER)} _ "$J" ${shellQuote(directory ?? "")} > "$J/out" 2>&1 < /dev/null &`,
+    `nohup $S sh -c ${shellQuote(wrapper)} _ "$J" ${shellQuote(directory ?? "")} > "$J/out" 2>&1 < /dev/null &`,
     'i=0; while [ ! -s "$J/pid" ] && [ "$i" -lt 30 ]; do sleep 0.1 2>/dev/null || sleep 1; i=$((i+1)); done',
-    `if [ -s "$J/pid" ]; then echo "started ${jobId} (pid $(cat "$J/pid"))"; else echo "job ${jobId} did not report a pid"; fi`,
+    `if [ -s "$J/pid" ]; then echo "started ${jobId} (pid $(cat "$J/pid"))"; else echo "job ${jobId} did not report a pid"; exit 1; fi`,
+    ")",
     "",
   ].join("\n");
 }
 
 export function buildJobStatusScript(
   jobId: string,
-  options: { offset?: number; tailBytes: number; maxBytes: number },
+  options: { offset?: number; tailBytes: number; maxBytes: number; metadataToken?: string; redactionContextBytes?: number },
 ): string {
   const dir = jobDir(jobId);
+  const context = options.redactionContextBytes ?? 0;
   const offset =
     options.offset === undefined
       ? "if [ \"$size\" -gt " + options.tailBytes + " ]; then start=$((size-" + options.tailBytes + ")); else start=0; fi"
@@ -95,21 +106,27 @@ export function buildJobStatusScript(
     'if [ ! -d "$J" ]; then echo "[job] $ID not found (never started, or pruned after ' +
       JOB_RETENTION_DAYS +
       ' days)";',
+    ...(options.metadataToken ? [`echo '${options.metadataToken}|not_found||||||'`] : []),
     "else",
     '  job_state "$J" "$ID"',
     '  now=$(date +%s); st=$(cat "$J/started" 2>/dev/null || echo "$now")',
     '  size=$(wc -c < "$J/out" 2>/dev/null | tr -d " "); size=${size:-0}',
     `  ${offset}`,
     `  len=$((size-start)); if [ "$len" -gt ${options.maxBytes} ]; then len=${options.maxBytes}; fi; end=$((start+len))`,
+    ...(options.metadataToken ? [`printf '%s|%s|%s|%s|%s|%s|%s|%s\\n' '${options.metadataToken}' "$state" "$code" "$pid" "$((now-st))" "$start" "$end" "$size"`] : []),
     '  echo "[job] $ID"',
     '  echo "[state] $state"',
     '  if [ -n "$code" ]; then echo "[exit code] $code"; fi',
     '  echo "[elapsed] $((now-st))s"',
-    '  echo "[command] $(head -c 200 "$J/cmd" 2>/dev/null | head -n 1)"',
+    context ? '  echo "[command] [hidden by redaction policy]"' : '  echo "[command] $(head -c 200 "$J/cmd" 2>/dev/null | head -n 1)"',
     '  echo "[output] bytes $start-$end of $size (next offset $end)"',
     '  echo "---"',
     // `head -c 0` is an error on BSD/macOS, so skip the read when nothing is new.
-    '  if [ "$len" -gt 0 ]; then tail -c +$((start+1)) "$J/out" 2>/dev/null | head -c "$len"; fi',
+    ...(context ? [
+      `  readStart=$((start-${context})); if [ "$readStart" -lt 0 ]; then readStart=0; fi`,
+      `  readEnd=$((end+${context})); if [ "$readEnd" -gt "$size" ]; then readEnd=$size; fi`,
+      '  readLen=$((readEnd-readStart)); if [ "$readLen" -gt 0 ]; then tail -c +$((readStart+1)) "$J/out" 2>/dev/null | head -c "$readLen" | base64; fi',
+    ] : ['  if [ "$len" -gt 0 ]; then tail -c +$((start+1)) "$J/out" 2>/dev/null | head -c "$len"; fi']),
     "fi",
     "",
   ].join("\n");
@@ -144,7 +161,7 @@ export function buildJobKillScript(jobId: string): string {
   ].join("\n");
 }
 
-export function buildJobListScript(limit: number): string {
+export function buildJobListScript(limit: number, hideCommands = false): string {
   return [
     JOB_STATE_FN,
     `R="${JOB_ROOT}"`,
@@ -154,7 +171,7 @@ export function buildJobListScript(limit: number): string {
     '    case "$ID" in job-*) ;; *) continue;; esac',
     `    n=$((n+1)); if [ "$n" -gt ${Math.max(1, Math.floor(limit))} ]; then break; fi`,
     '    J="$R/$ID"; job_state "$J" "$ID"',
-    '    echo "$ID  $state${code:+ (exit $code)}  $(head -c 100 "$J/cmd" 2>/dev/null | head -n 1)"',
+    hideCommands ? '    echo "$ID  $state${code:+ (exit $code)}  [command hidden by redaction policy]"' : '    echo "$ID  $state${code:+ (exit $code)}  $(head -c 100 "$J/cmd" 2>/dev/null | head -n 1)"',
     "  done",
     '  if [ "$n" -eq 0 ]; then echo "(no jobs)"; fi',
     "fi",

@@ -17,7 +17,7 @@ test('concurrent operations keep output and outcomes separate, including nonzero
   log.subscribe(event => events.push(event));
   await Promise.all([
     log.run('ssh_exec', 'mcp', { command: 'first' }, 'a', async () => { const output = log.outputReporter(); await delay(20); output('first output'); return { content: [{ type: 'text', text: 'first output' }] }; }),
-    log.run('ssh_exec', 'mcp', { command: 'second' }, 'b', async () => { const output = log.outputReporter(); output('second output'); await delay(5); return { content: [{ type: 'text', text: 'second output\n[exit code] 7' }] }; }),
+    log.run('ssh_exec', 'mcp', { command: 'second' }, 'b', async () => { const output = log.outputReporter(); output('second output'); await delay(5); log.markFailed(); return { content: [{ type: 'text', text: 'second output\n[exit code] 7' }] }; }),
   ]);
   const [first, second] = log.list(); assert.equal(first.output, 'first output'); assert.equal(second.output, 'second output');
   assert.equal(first.status, 'succeeded'); assert.equal(second.status, 'failed');
@@ -58,4 +58,75 @@ test('historical schema-less list context is removed without losing operation re
   assert.equal(restored.list()[0].input,'{}'); assert.equal(restored.list()[0].connectionName,undefined);
   assert.equal(restored.list()[0].result,'Configured SSH servers');
   restored.close(); assert.ok(!fs.readFileSync(log.file,'utf8').includes('requestInfo'));
+});
+test('restart interrupts unfinished session requests and persists the repair without a new operation', t => {
+  const log = fixture(t);
+  const read = log.start('ssh_session_read', 'mcp', { sessionName: 'terminal' }, 'host');
+  const write = log.start('web_session_write', 'web', { sessionName: 'terminal' }, 'host');
+  const output = log.start('session_output', 'monitor', { sessionName: 'terminal' }, 'host');
+  log.close();
+  const restored = new ActivityLog(log.file);
+  for (const id of [read, write]) {
+    assert.equal(restored.get(id).status, 'interrupted');
+    assert.ok(restored.get(id).finishedAt);
+  }
+  assert.equal(restored.get(output).status, 'running');
+  restored.close();
+  const persisted = JSON.parse(fs.readFileSync(log.file, 'utf8'));
+  assert.equal(persisted.find(r => r.id === read).status, 'interrupted');
+  assert.equal(persisted.find(r => r.id === write).status, 'interrupted');
+});
+
+test('output markers are data and do not turn successful reads or commands into failures', async t => {
+  const log = fixture(t);
+  for (const operation of ['ssh_exec', 'ssh_file_read', 'ssh_session_read', 'web_command']) {
+    await log.run(operation, 'mcp', {}, 'host', () => ({ content: [{ type: 'text', text: '[exit code] 9\n[signal] TERM\nCommand terminated by signal' }] }));
+    assert.equal(log.list().at(-1).status, 'succeeded', operation);
+  }
+  await log.run('ssh_exec', 'mcp', {}, 'host', () => {
+    log.markFailed();
+    return { content: [{ type: 'text', text: '[exit code] 0\n[exit code] 7' }] };
+  });
+  assert.equal(log.list().at(-1).status, 'failed');
+});
+
+test('temporary history write failure retries without another operation and announces recovery', async t => {
+  const log = fixture(t), events = [];
+  log.subscribe(event => events.push(event.type));
+  fs.mkdirSync(log.file);
+  await log.run('ssh_exec', 'mcp', { command: 'record-me' }, 'host', () => 'completed');
+  log.flush(); assert.ok(log.storageError);
+  fs.rmdirSync(log.file);
+  const deadline = Date.now() + 3000;
+  while ((!fs.existsSync(log.file) || log.storageError) && Date.now() < deadline) await delay(30);
+  assert.equal(log.storageError, undefined);
+  assert.equal(JSON.parse(fs.readFileSync(log.file, 'utf8'))[0].result, 'completed');
+  assert.ok(events.includes('storage-recovered'));
+  assert.equal(fs.statSync(log.file).mode & 0o777, 0o600);
+});
+
+test('closing after a storage failure makes one final save attempt and leaves no retry timer', async t => {
+  const log = fixture(t), events = [];
+  log.subscribe(event => events.push(event.type));
+  fs.mkdirSync(log.file);
+  await log.run('ssh_exec', 'mcp', {}, 'host', () => 'completed');
+  log.flush(); assert.ok(log.storageError);
+  fs.rmdirSync(log.file);
+  log.close(); log.close();
+  assert.equal(JSON.parse(fs.readFileSync(log.file, 'utf8'))[0].result, 'completed');
+  assert.equal(events.filter(type => type === 'closed').length, 1);
+  assert.equal(log.timer, undefined);
+});
+
+test('persistent storage failures stop retrying after the log closes', async t => {
+  const log = fixture(t), events = [];
+  log.subscribe(event => events.push(event.type));
+  fs.mkdirSync(log.file);
+  await log.run('ssh_exec', 'mcp', {}, 'host', () => 'completed');
+  log.flush(); log.close();
+  assert.equal(log.timer, undefined);
+  fs.rmdirSync(log.file);
+  await delay(1200);
+  assert.equal(fs.existsSync(log.file), false);
+  assert.equal(events.at(-1), 'closed');
 });

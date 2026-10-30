@@ -1,10 +1,12 @@
 # 测试文档
 
-本项目使用 Node.js 内置的测试框架进行单元测试和集成测试。当前共 394 项，最近完整结果见 [测试报告](../docs/TEST_REPORT.md)。
+本项目使用 Node.js 内置的测试框架进行单元测试和集成测试。当前共 479 项，最近完整结果见 [测试报告](../docs/TEST_REPORT.md)。
 
 实际 SSH 集成测试需要本机 `ssh`、`ssh-keygen`、`rsync` 和 sshd（默认 `/usr/sbin/sshd`，可用 `SSH_AGENT_TEST_SSHD` 指定）。测试创建临时密钥与仅监听 loopback 的临时服务器，不连接个人配置中的服务器。真实 sshd 测试要求账户可以使用公钥登录该本机测试服务。
 
 新增的主要集成测试：
+
+- `exec-deployment.test.js` / `exec-deployment-live.test.js`：命令过滤与参数预检、输出预算与落盘失败、ssh2/OpenSSH 的多行脚本、失败即停、同 shell 批量步骤、远端文件环境注入与符号链接边界，以及模拟 sudo 包装。真实 MCP stdio 全工具测试也覆盖新参数。Python 覆盖 58 行 JSON/SQL 脚本、异常与退出码、cwd/env/远端文件注入，以及超时前无缓冲输出；解释器过滤和 shell 专用参数冲突在连接前校验。
 
 - `mcp-regressions.test.js`：两种后端真实 MCP HTTP 请求的并发编辑、默认连接终端复用、符号链接路径边界、上传/下载和转发停止记录归属。
 
@@ -12,7 +14,7 @@
 
 - `web-ui-live.test.js`：两种后端的真实 HTTP 工作流，包含连接/诊断/重连、完整文本读取、哈希校验、空文件编辑、备份恢复、上传、持久会话、任务和转发；配合 HTTP 与 CLI 回归验证鉴权、跨站防护和 UI 路由。
 
-- `mcp-live-tools.test.js`：分别通过 ssh2/OpenSSH，从真实 MCP stdio 客户端调用全部 31 个工具；含超时、中文、二进制目录传输、rsync/SFTP、持久终端、任务、转发、连接诊断、配置热加载和日志清理。后台任务 HOME 被限定到临时目录。
+- `mcp-live-tools.test.js`：分别通过 ssh2/OpenSSH，从真实 MCP stdio 客户端调用全部 33 个工具；含超时、中文、二进制目录传输、rsync/SFTP、持久终端、任务、转发、连接诊断、配置热加载和日志清理。后台任务 HOME 被限定到临时目录。
 - `full-features-live.test.js`：证书认证、ProxyCommand/Match、块级差分、父进程退出后的终端恢复。
 - `auth-live-audit.test.js`：两种后端的加密私钥认证与错误主机公钥拒绝。
 - `audit-regressions.test.js`：通道进程回收、终端重开与反向转发断线清理。
@@ -218,3 +220,15 @@ it.only('只运行这个测试', () => {
 - `browser/workbench-races.js`：独立运行的真实浏览器回归，覆盖切换目标时清空未发送命令，以及延迟文件读取/恢复保留草稿；执行方式见 `browser/README.md`。
 
 - `forward-lifecycle.test.js`：转发创建期间关闭/断线、迟到端口分配回收、反向转发超时，以及并发创建的数量限制和名额释放。
+
+### 结构化结果与固定动作策略
+
+- `execution-policy.test.js`：策略配置失败关闭、所有执行旁路连接前拒绝、步骤事件分片及内存上界。
+- `execution-result-live.test.js`：两种后端真实 SSH 的结构化退出、步骤、并发、超时、日志故障和固定动作字面量执行。
+- 阿里云独立 MCP 验证结果见 `docs/TEST_REPORT.md` 最新记录。
+
+- `execution-edge-cases.test.js`：无退出状态的通道关闭、流错误日志保留，以及异步准备/排队期间的策略重载竞态。
+
+- `operations-workflow.test.js`：多主机目标拒绝、后台脚本与状态恢复、35 MiB 跨端点传输、超时/摘要损坏/越界/受限策略回归。
+
+- `operations-improvements.test.js`：脱敏配置失败关闭、跨块/跨页秘密、完整 exec 日志与终端日志、原生收尾诊断、inode/硬链接观察、空文件截断、默认原子替换、多机失败隔离/顺序/并发预算；两种真实 SSH 后端均覆盖。`agent-files.test.js` 另注入原地截短失败，检查备份与部分写入提示。

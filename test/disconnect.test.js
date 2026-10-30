@@ -27,7 +27,7 @@ for (const backend of ['ssh2', 'openssh']) test(`disconnect through MCP and web 
   const endpoint = await server.listen(), client = new Client({ name: 'test', version: '1' });
   await client.connect(new StreamableHTTPClientTransport(new URL(endpoint)));
   const call = async (name, args = {}) => {
-    const result = await client.callTool({ name, arguments: args });
+    const result = await client.callTool({ name, arguments: {connectionName: 'fixture', ...args} });
     const text = result.content.map(c => c.text || '').join('\n');
     assert.ok(!result.isError, text); return text;
   };

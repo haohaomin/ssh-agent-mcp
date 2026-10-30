@@ -1,3 +1,4 @@
+import { OpenSshDiagnostics } from '../utils/openssh-diagnostics.js';
 import { fileURLToPath } from 'node:url';
 import { shellQuote } from '../utils/shell.js';
 import { EventEmitter } from 'node:events';
@@ -14,8 +15,13 @@ import type { SSHConfig } from '../models/types.js';
 const require=createRequire(import.meta.url);
 class ProcessChannel extends Duplex {
   stderr: NodeJS.ReadableStream;
-  constructor(readonly child: ChildProcessWithoutNullStreams) {
-    super({emitClose:false});this.stderr=child.stderr;
+  constructor(readonly child: ChildProcessWithoutNullStreams, filterDiagnostics = false) {
+    super({emitClose:false});
+    if (filterDiagnostics) {
+      const filter = new OpenSshDiagnostics();
+      filter.on('diagnostic', diagnostic => this.emit('diagnostic', diagnostic));
+      this.stderr = child.stderr.pipe(filter);
+    } else this.stderr = child.stderr;
     child.stdout.on('data',data=>{if(!this.push(data))child.stdout.pause();});child.stdout.on('end',()=>this.push(null));
     child.stdin.on('error',error=>this.destroy(error));
     child.on('error',error=>this.destroy(error));
@@ -92,7 +98,7 @@ export class OpenSshClient extends EventEmitter {
   }
   exec(command:string, options:any, callback:any){
     const child=this.run([...this.args([options?.pty?'-tt':'-T','-o','RemoteCommand=none']),command]);
-    const channel=new ProcessChannel(child);callback(undefined,channel);
+    const channel=new ProcessChannel(child, true);callback(undefined,channel);
   }
   shell(options:any,callback:any){
     try{

@@ -35,10 +35,18 @@ export class ActivityMonitor {
     if (['ssh_session_start', 'ssh_session_ensure', 'ssh_session_write', 'web_sessions_start', 'web_session_write'].includes(operation)) {
       const name = args.sessionName;
       if (typeof name !== 'string') return;
-      if (this.log.list().some(r => r.operation === 'session_output' && r.sessionName === name && r.status === 'running')) return;
+      const sessionInstance = this.sessions.instanceIdentity(name);
+      const previous = this.log.list().filter(r => r.operation === 'session_output' && r.sessionName === name && r.status === 'running');
+      if (previous.some(r => r.sessionInstance === sessionInstance)) return;
+      for (const record of previous) this.endReplacedSession(record.id);
+
       const connectionName = this.sessions.connectionName(name);
-      this.log.start('session_output', 'monitor', { sessionName: name }, connectionName);
+      const recordId = this.log.start('session_output', 'monitor', { sessionName: name }, connectionName);
+      this.log.update(recordId, { sessionInstance }, true);
     }
+  }
+  private endReplacedSession(id: string) {
+    this.log.update(id, { status: 'interrupted', result: '会话实例已更换或无法确认，已停止旧实例的输出跟踪。', finishedAt: new Date().toISOString() }, true);
   }
   private async poll() {
     if (this.busy || this.closed) return;
@@ -59,7 +67,14 @@ export class ActivityMonitor {
               const ended = ['exited', 'killed', 'lost'].includes(jobState);
               this.log.update(record.id, { output, jobState, status: ended ? jobState === 'exited' && exit === '0' ? 'succeeded' : 'failed' : 'running', finishedAt: ended ? new Date().toISOString() : undefined });
             } else if (record.sessionName) {
+              if (!record.sessionInstance || this.sessions.instanceIdentity(record.sessionName) !== record.sessionInstance) {
+                this.endReplacedSession(record.id); continue;
+              }
               const result = await this.sessions.read(record.sessionName, 0, 1);
+              // A stop/start can replace metadata while the worker read is in flight.
+              if (this.sessions.instanceIdentity(record.sessionName) !== record.sessionInstance) {
+                this.endReplacedSession(record.id); continue;
+              }
               const transcript = this.sessions.transcript(record.sessionName, 0, 0);
               const log = this.sessions.transcript(record.sessionName, Math.max(0, transcript.totalBytes - 16384), 16384);
               this.log.update(record.id, { output: log.output || '', status: result.closed ? 'succeeded' : 'running', finishedAt: result.closed ? new Date().toISOString() : undefined });

@@ -1,9 +1,13 @@
+import type { ExecutionPolicy } from '../utils/execution-policy.js';
 import type { Algorithms } from "ssh2";
 
 /**
  * SSH connection configuration interface
  */
 export interface SSHConfig {
+  redactLocalFiles?: string[]; // Admin-owned local text files containing exact values to suppress
+  redactEnv?: string[]; // Admin-owned environment variable names, not values
+  executionPolicy?: ExecutionPolicy;
   backend?: 'ssh2' | 'openssh';
   nativeTarget?: string;
   nativeConfigFile?: string;

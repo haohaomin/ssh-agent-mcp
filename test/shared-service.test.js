@@ -36,7 +36,7 @@ test('automatic shared service with real stdio clients and SSH', {timeout:60000}
   await t.test('concurrent legacy clients start only one service, with occupied-port fallback',async()=> {
     const services=records();assert.equal(services.length,1);service=services[0];
     assert.notEqual(Number(new URL(service.endpoint).port),occupied.address().port);
-    assert.equal((await a.listTools()).tools.length,31);assert.equal((await b.listTools()).tools.length,31);
+    assert.equal((await a.listTools()).tools.length,33);assert.equal((await b.listTools()).tools.length,33);
     assert.equal(fs.statSync(path.join(dir,'services',service.key+'.json')).mode&0o777,0o600);
   });
   await t.test('UI launcher reuses the same service without client configuration changes',async()=> {
@@ -66,11 +66,11 @@ test('automatic shared service with real stdio clients and SSH', {timeout:60000}
     process.kill(service.pid,'SIGKILL');await delay(200);
     const lock=path.join(dir,'services',service.key+'.lock');fs.writeFileSync(lock,JSON.stringify({pid:2147483647}));
     const old=new Date(Date.now()-5000);fs.utimesSync(lock,old,old);
-    const c=await makeClient();assert.equal((await c.listTools()).tools.length,31);
+    const c=await makeClient();assert.equal((await c.listTools()).tools.length,33);
     const recovered=records().find(r=>r.key===service.key);assert.notEqual(recovered.pid,service.pid);
     process.kill(recovered.pid,'SIGKILL');await delay(150);
     await assert.rejects(c.callTool({name:'ssh_exec',arguments:{command:'printf do_not_replay',connectionName:'fixture'}}),/not retried/);
-    assert.equal((await c.listTools()).tools.length,31);
+    assert.equal((await c.listTools()).tools.length,33);
     const latest=records().find(r=>r.key===service.key);
     const history=await fetch(new URL('api/activity',latest.ui),{headers:{Authorization:'Bearer '+latest.token}});
     assert.ok(!(await history.text()).includes('do_not_replay'));

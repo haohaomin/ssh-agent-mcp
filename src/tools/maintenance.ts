@@ -1,3 +1,4 @@
+import { cleanupExecLogs } from '../services/exec-log-retention.js';
 import fs from "node:fs";
 import { spawnSync } from "node:child_process";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -72,14 +73,15 @@ export function registerMaintenanceTools(server: McpServer): void {
   });
 
   server.registerTool("ssh_session_log_cleanup", {
-    description: "Preview or remove logs and metadata for stopped durable sessions whose workers have exited. Dry-run is enabled by default. maxTotalBytes caps retained eligible logs; active workers and unknown state are skipped.",
+    description: "Preview/remove logs: scope=sessions handles stopped durable sessions whose workers exited; scope=exec handles UUID exec-output logs. Automatic exec retention runs after log writes (7 days/512 MiB, protecting the newest output). Dry-run is enabled by default. maxTotalBytes caps retained eligible logs; active workers and unknown state are skipped.",
     inputSchema: {
+      scope: z.enum(['sessions','exec']).default('sessions').describe('sessions preserves existing cleanup; exec previews/deletes UUID exec-output logs'),
       maxAgeDays: z.number().min(0).max(36500).default(30),
       maxTotalBytes: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
       dryRun: z.boolean().default(true),
     },
-  }, async ({ maxAgeDays, maxTotalBytes, dryRun }) => {
-    try { return result(await sessions.cleanup({ maxAgeDays, maxTotalBytes, dryRun })); }
+  }, async ({ scope, maxAgeDays, maxTotalBytes, dryRun }) => {
+    try { if(scope==='exec')return result(cleanupExecLogs({maxAgeDays,maxTotalBytes,dryRun})); return result(await sessions.cleanup({ maxAgeDays, maxTotalBytes, dryRun })); }
     catch (error) { return failure(error); }
   });
 }

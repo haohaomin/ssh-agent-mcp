@@ -13,7 +13,8 @@ test('closed session log cleanup is dry-run by default and removes only when req
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'ssh-maintenance-'));const previous=process.env.SSH_AGENT_STATE_DIR;process.env.SSH_AGENT_STATE_DIR=root;
   t.after(()=>{if(previous===undefined)delete process.env.SSH_AGENT_STATE_DIR;else process.env.SSH_AGENT_STATE_DIR=previous;fs.rmSync(root,{recursive:true,force:true});});
   const paths=sessionPaths('closed');fs.writeFileSync(paths.log,'old output');writeSessionMeta(paths.meta,{sessionName:'closed',configHash:'x',socketPath:path.join(root,'missing.sock'),logPath:paths.log,pid:2147483647,startedAt:'2000-01-01T00:00:00.000Z',closed:true});
-  const sessions=new DurableSessions(SSHConnectionManager.getInstance());
+  const manager=SSHConnectionManager.getInstance();manager.setConfig({fixture:{host:'127.0.0.1',port:1,username:'fixture'}});t.after(()=>manager.disconnect());
+  const sessions=new DurableSessions(manager);
   const empty=sessionPaths('starting');fs.writeFileSync(empty.lock,'');await assert.rejects(sessions.start('starting'),/starting or being cleaned/);assert.ok(fs.existsSync(empty.lock));
   const preview=await sessions.cleanup({maxAgeDays:0});assert.equal(preview.dryRun,true);assert.deepEqual(preview.candidates.map(item=>item.sessionName),['closed']);assert.ok(fs.existsSync(paths.log));
   const deleted=await sessions.cleanup({maxAgeDays:0,dryRun:false});assert.deepEqual(deleted.deleted,['closed']);assert.equal(fs.existsSync(paths.meta),false);assert.equal(fs.existsSync(paths.log),false);

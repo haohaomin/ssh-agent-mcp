@@ -52,11 +52,17 @@ export function registerListServersTool(server: McpServer): void {
     async () => {
       const sshManager = SSHConnectionManager.getInstance();
       const servers = sshManager.getAllServerInfos();
+      const executionPolicies = servers.map(server => {
+        const policy = sshManager.getConfig(server.name).executionPolicy;
+        return {connectionName: server.name, mode: policy?.mode || 'unrestricted',
+          actions: Object.entries(policy?.actions || {}).map(([name, value]) => ({name, description: value.description || ''}))};
+      });
       return {
+        structuredContent: {servers, executionPolicies},
         content: [
           {
             type: "text",
-            text: formatServerList(servers),
+            text: formatServerList(servers) + '\nExecution policies: ' + JSON.stringify(executionPolicies),
           },
         ],
       };

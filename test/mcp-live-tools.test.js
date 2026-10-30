@@ -10,7 +10,7 @@ import {localSshd} from './helpers/local-sshd.js';
 import {importOpenSsh} from '../build/utils/openssh-import.js';
 import {shellQuote} from '../build/utils/shell.js';
 
-for(const backend of ['ssh2','openssh']) test(`all 31 tools through real MCP stdio and sshd (${backend})`, {timeout:60000}, async t=>{
+for(const backend of ['ssh2','openssh']) test(`all 33 tools through real MCP stdio and sshd (${backend})`, {timeout:60000}, async t=>{
   const fixture=await localSshd(t),root=fixture.root;
   const config=backend==='ssh2'?fixture.config:{...importOpenSsh(fixture.clientConfig).configs.fixture,allowedLocalPaths:[root],allowedRemotePaths:[root],pty:false};
   // Keep real remote job state within the disposable test directory.
@@ -27,10 +27,18 @@ for(const backend of ['ssh2','openssh']) test(`all 31 tools through real MCP std
   const echo=net.createServer(socket=>{socket.on('error',()=>{});socket.pipe(socket);});await new Promise(r=>echo.listen(0,'127.0.0.1',r));
   const roundtrip=port=>new Promise((resolve,reject)=>{const socket=net.connect(port,'127.0.0.1',()=>socket.write('mcp-forward'));socket.setTimeout(3000,()=>socket.destroy(new Error('timeout')));socket.on('error',reject);socket.once('data',data=>{socket.destroy();resolve(data.toString());});});
   try{
-    const definitions=await client.listTools();assert.equal(definitions.tools.length,31);
+    const definitions=await client.listTools();assert.equal(definitions.tools.length,33);
     assert.match(await invoke('ssh_server_list'),/fixture/);
+    assert.match(await invoke('ssh_exec_many',{targets:['fixture'],command:'printf fanout-ok'}),/fixture: exit 0/);
     assert.match(await invoke('ssh_exec',{command:'printf "%s|%s" "$TEST_ENV" "$PWD"',env:{TEST_ENV:'中文 value'},cwd:root}),new RegExp('中文 value\\|'+root));
     assert.match(await invoke('ssh_exec',{command:'printf failed; exit 7'}),/\[exit code\] 7/);
+    assert.match(await invoke('ssh_exec',{script:'false\nprintf should-not-run',failFast:true,maxBytes:1}),/\[exit code\] 1$/);
+    assert.match(await invoke('ssh_exec',{steps:['export STEP_VALUE=shared','printf %s "$STEP_VALUE"']}),/shared/);
+    const envFile=path.join(root,'remote-env.secret');fs.writeFileSync(envFile,'synthetic-secret',{mode:0o600});
+    assert.equal(await invoke('ssh_exec',{script:'test -n "$KEY" && printf remote-only',envFromRemoteFiles:{KEY:envFile}}),'remote-only');
+    assert.equal(await invoke('ssh_exec',{script:'import os\nassert os.environ["KEY"]\nprint("python-mcp-ok")',interpreter:'python3',envFromRemoteFiles:{KEY:envFile}}),'python-mcp-ok');
+    await invoke('ssh_exec',{steps:['print(1)'],interpreter:'python3'},true);
+    await invoke('ssh_exec',{command:'true',steps:['true']},true);
     await invoke('ssh_exec',{command:'sleep 3',timeoutMs:100},true);
     assert.match(await invoke('ssh_exec',{command:'printf after-timeout'}),/after-timeout/);
     const remote=path.join(root,'text.txt');
@@ -48,6 +56,7 @@ for(const backend of ['ssh2','openssh']) test(`all 31 tools through real MCP std
     const local=path.join(root,'source'),uploaded=path.join(root,'uploaded'),downloaded=path.join(root,'downloaded');fs.mkdirSync(local);fs.mkdirSync(path.join(local,'nested'));fs.writeFileSync(path.join(local,'nested','binary'),Buffer.from([0,255,1,128,13,10]));
     await invoke('ssh_upload',{localPath:local,remotePath:uploaded});
     await invoke('ssh_download',{remotePath:uploaded,localPath:downloaded});
+    await invoke('ssh_file_transfer',{sourceConnectionName:'fixture',sourcePath:path.join(uploaded,'nested','binary'),destinationConnectionName:'fixture',destinationPath:uploaded+'.relayed'});
     assert.deepEqual(fs.readFileSync(path.join(downloaded,'nested','binary')),fs.readFileSync(path.join(local,'nested','binary')));
     const sync=path.join(root,'sync target');fs.mkdirSync(sync);fs.writeFileSync(path.join(sync,'obsolete'),'obsolete');
     await invoke('ssh_sync',{localPath:local+'/',remotePath:sync+'/',direction:'upload',deleteExtra:true});assert.ok(fs.existsSync(path.join(sync,'obsolete')));

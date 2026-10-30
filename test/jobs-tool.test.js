@@ -13,7 +13,7 @@ describe('job-* 工具', () => {
     manager = SSHConnectionManager.getInstance();
     originals = {
       jobStart: manager.jobStart,
-      jobStatus: manager.jobStatus,
+      jobStatusDetailed: manager.jobStatusDetailed,
       jobKill: manager.jobKill,
       jobList: manager.jobList,
     };
@@ -44,7 +44,7 @@ describe('job-* 工具', () => {
   });
 
   it('job-status / job-kill / job-list 把参数传给管理器', async () => {
-    manager.jobStatus = async (id, opts, name) => `status ${id} ${JSON.stringify(opts)} ${name}`;
+    manager.jobStatusDetailed = async (id, opts, name) => ({output:`status ${id} ${JSON.stringify(opts)} ${name}`});
     manager.jobKill = async (id, name) => `kill ${id} ${name}`;
     manager.jobList = async (limit, name) => `list ${limit} ${name}`;
 

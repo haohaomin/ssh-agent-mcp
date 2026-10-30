@@ -63,7 +63,7 @@ function setInput(enabled) {
 }
 function resetFile() {
   draftRevision++;
-  Object.assign(state, { file: '', original: '', draft: '', hash: '', backup: null });
+  Object.assign(state, { file: '', original: '', draft: '', hash: '', redacted: false, backup: null });
   $('#file-preview').hidden = true; $('#restore-file').hidden = true; $('#backup-path').textContent = ''; renderFile();
 }
 function setView(view) {
@@ -210,7 +210,8 @@ async function createSession() {
 function renderFile() {
   if ($('#file-content').value !== state.draft) $('#file-content').value = state.draft;
   $('#file-name').textContent = state.file.split('/').pop() || '选择文件'; $('#file-name').title = state.file; $('#edit-state').textContent = dirty() ? '未保存' : '未修改';
-  $('#file-content').disabled = !state.file; $('#file-actions').hidden = !state.file || !dirty();
+  $('#file-content').disabled = !state.file; $('#file-content').readOnly = !!state.redacted; $('#file-actions').hidden = !state.file || state.redacted || !dirty();
+  if (state.redacted) $('#edit-state').textContent = '含已隐藏的敏感值，只读';
 }
 let directoryRequest = 0, fileRequest = 0;
 async function loadFiles(path) {
@@ -234,7 +235,7 @@ async function loadFile(path, force = false) {
   const result = await request(`/file?path=${encodeURIComponent(path)}&connectionName=${encodeURIComponent(state.host)}`);
   if (epoch !== state.epoch || sequence !== fileRequest) return;
   if (revision !== draftRevision) { say('读取期间文件有新修改，草稿已保留；请保存后重新打开文件。'); return; }
-  resetFile(); Object.assign(state, { file: path, original: result.content, draft: result.content, hash: result.sha256 }); renderFile();
+  resetFile(); Object.assign(state, { file: path, original: result.content, draft: result.content, hash: result.sha256, redacted: !!result.redacted }); renderFile();
   $$('#file-list button').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.path === path)));
 }
 let taskRequest = 0, forwardRequest = 0;
@@ -284,6 +285,7 @@ async function restoreFile() {
   if (!state.backup || !discard()) return;
   const epoch = state.epoch, path = state.file, hash = state.hash, host = state.host, revision = draftRevision;
   const backup = await request(`/file?path=${encodeURIComponent(state.backup)}&connectionName=${encodeURIComponent(host)}`);
+  if (backup.redacted) throw new Error('备份包含已隐藏的敏感值，不能将隐藏后的内容写回文件。');
   const result = await post('/file/edit', { remotePath: path, content: backup.content, expectedSha256: hash, backup: true, connectionName: host });
   if (epoch !== state.epoch || state.file !== path || state.hash !== hash) return;
   state.original = backup.content; state.hash = result.afterSha256; state.backup = result.backupPath || null;

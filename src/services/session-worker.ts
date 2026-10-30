@@ -1,3 +1,4 @@
+import { installRedactionValues } from '../utils/output-redaction.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -5,8 +6,9 @@ import net from 'node:net';
 import { spawnSync } from 'node:child_process';
 import { SSHConnectionManager } from './ssh-connection-manager.js';
 import { configHash, writeSessionMeta, type SessionMeta } from './durable-sessions.js';
-process.once('message',async({sessionName,connectionName,config,options,paths}:any)=>{
+process.once('message',async({sessionName,connectionName,config,options,paths,redactionValues}:any)=>{
   const manager=SSHConnectionManager.getInstance();const key=connectionName||'default';manager.setConfig({[key]:config});
+  if (Array.isArray(redactionValues)) installRedactionValues(redactionValues, true);
   const directory=fs.mkdtempSync(path.join(os.tmpdir(),'ssh-session-'));fs.chmodSync(directory,0o700);const socketPath=path.join(directory,'socket');
   let server:net.Server|undefined;
   let cleaned=false;

@@ -1,3 +1,4 @@
+import { redactText } from './output-redaction.js';
 import { LogLevel } from '../models/types.js';
 
 /**
@@ -13,7 +14,7 @@ export class Logger {
     const formattedMessage = `[${timestamp}] [${level.toUpperCase()}] ${message}`;
 
     // Always write to stderr to avoid corrupting MCP protocol messages on stdout
-    process.stderr.write(formattedMessage + '\n');
+    process.stderr.write(redactText(formattedMessage) + '\n');
   }
 
   /**
@@ -33,6 +34,6 @@ export class Logger {
       process.exit(1);
     }
 
-    return fullMessage;
+    return redactText(fullMessage);
   }
 }

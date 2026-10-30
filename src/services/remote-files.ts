@@ -1,3 +1,5 @@
+import { redactByteSlice, redactText } from '../utils/output-redaction.js';
+import { assertUnrestricted } from '../utils/execution-policy.js';
 import { rsyncTransfer, type SyncOptions } from './rsync.js';
 import picomatch from 'picomatch';
 import { SearchMatcher, type SearchOptions } from '../utils/search-matcher.js';
@@ -36,6 +38,29 @@ function write(sftp: SFTPWrapper, p: string, content: string, flags: 'wx' | 'w',
     stream.on('error', reject); stream.on('close', resolve); stream.end(content);
   });
 }
+/** Non-atomic, opt-in edit of an existing inode. Caller holds a cooperative lock and saves a backup. */
+async function rewriteInPlace(sftp: SFTPWrapper, file: string, original: string, changed: string): Promise<void> {
+  const handle = await new Promise<Buffer>((resolve, reject) => sftp.open(file, 'r+', (e, h) => e ? reject(e) : resolve(h)));
+  try {
+    const info = await new Promise<Stats>((resolve, reject) => sftp.fstat(handle, (e, st) => e ? reject(e) : resolve(st)));
+    const before = Buffer.from(original), after = Buffer.from(changed);
+    if (!info.isFile() || info.size !== before.length) throw new Error('File changed before inPlace write');
+    const actual = Buffer.alloc(before.length);
+    for (let offset = 0; offset < actual.length;) {
+      const count = await new Promise<number>((resolve, reject) => sftp.read(handle, actual, offset, Math.min(32768, actual.length-offset), offset, (e, n) => e ? reject(e) : resolve(n)));
+      if (!count) throw new Error('File changed before inPlace write');
+      offset += count;
+    }
+    if (!actual.equals(before)) throw new Error('File changed before inPlace write');
+    for (let offset = 0; offset < after.length; offset += 32768) {
+      await new Promise<void>((resolve, reject) => sftp.write(handle, after, offset, Math.min(32768, after.length-offset), offset, e => e ? reject(e) : resolve()));
+    }
+    await new Promise<void>((resolve, reject) => sftp.fsetstat(handle, {size: after.length}, e => e ? reject(e) : resolve()));
+  } finally {
+    await new Promise<void>((resolve, reject) => sftp.close(handle, e => e ? reject(e) : resolve()));
+  }
+  if (await text(sftp, file) !== changed) throw new Error('File changed during inPlace write or verification failed');
+}
 export function applyEdits(original: string, edits: { oldText: string; newText: string }[]): string {
   let content = original;
   for (const edit of edits) {
@@ -47,12 +72,12 @@ export function applyEdits(original: string, edits: { oldText: string; newText: 
   }
   return content;
 }
-export type EditOptions = { dryRun?: boolean; backup?: boolean; expectedSha256?: string };
+export type EditOptions = { dryRun?: boolean; backup?: boolean; expectedSha256?: string; writeMode?: 'atomic' | 'inPlace' };
 function editPreview(original: string, changed: string) {
   const hash = (value: string) => createHash('sha256').update(value).digest('hex');
   // Bound tokenization and diff work separately from the file size budget.
   const lines = (original.match(/\n/g)?.length || 0) + (changed.match(/\n/g)?.length || 0);
-  const patch = lines > 50000 ? undefined : createTwoFilesPatch('before', 'after', original, changed, undefined, undefined, {context:3,timeout:100,maxEditLength:2000});
+  const patch = lines > 50000 ? undefined : createTwoFilesPatch('before', 'after', redactText(original), redactText(changed), undefined, undefined, {context:3,timeout:100,maxEditLength:2000});
   return { beforeSha256:hash(original), afterSha256:hash(changed), diff:patch?.slice(0,65536) ?? '', diffTruncated:patch === undefined || patch.length > 65536 };
 }
 export class RemoteFiles {
@@ -87,7 +112,8 @@ export class RemoteFiles {
   async view(p: string, start = 1, count = 200, name?: string) {
     return this.manager.withSftp(name, async sftp => {
       const content = await text(sftp, await this.checked(sftp, p, name));
-      const lines = content.split('\n');
+      const buffer = Buffer.from(content);
+      const lines = redactByteSlice(buffer, 0, buffer.length).split('\n');
       const selected = lines.slice(start - 1, start - 1 + count);
       return { path: p, totalLines: lines.length, startLine: start, content: selected.map((line, i) => `${start + i}\t${line}`).join('\n'), nextLine: start - 1 + selected.length < lines.length ? start + selected.length : null };
     });
@@ -96,7 +122,8 @@ export class RemoteFiles {
   async readText(p: string, name?: string) {
     return this.manager.withSftp(name, async sftp => {
       const content = await text(sftp, await this.checked(sftp, p, name));
-      return { path: p, content, sha256: createHash('sha256').update(content).digest('hex') };
+      const visible = redactText(content);
+      return { path: p, content:visible, ...(visible === content ? {} : {redacted:true}), sha256: createHash('sha256').update(content).digest('hex') };
     });
   }
   async replace(p: string, content: string, expectedSha256: string, name?: string, options: EditOptions = {}) {
@@ -117,31 +144,39 @@ export class RemoteFiles {
       const work = before.catch(() => {}).then(async () => {
         const original = await text(sftp, resolved);
         if (options.expectedSha256 && createHash('sha256').update(original).digest('hex') !== options.expectedSha256.toLowerCase()) throw new Error('File hash differs from preview; read and preview the file again');
+        if (replacement !== undefined && redactText(original) !== original) throw new Error('File contains configured secrets; whole-file replacement is disabled to prevent saving redacted text. Use exact edits outside secret values or upload the original file.');
         const changed = replacement ?? applyEdits(original, edits);
         if(Buffer.byteLength(changed)>MAX_TEXT)throw new Error('Text exceeds 4 MiB');
-        const preview = {remotePath:p,dryRun:options.dryRun ?? false,changed:changed!==original,replacements:edits.length,bytes:Buffer.byteLength(changed),...editPreview(original,changed)};
+        const writeMode = options.writeMode ?? 'atomic';
+        if (!['atomic', 'inPlace'].includes(writeMode)) throw new Error('Invalid writeMode');
+        const preview = {writeMode, atomic:writeMode === 'atomic', inodePreserved:writeMode === 'inPlace', remotePath:p,dryRun:options.dryRun ?? false,changed:changed!==original,replacements:edits.length,bytes:Buffer.byteLength(changed),...editPreview(original,changed)};
         this.manager.activity?.log.detail({ diff: preview.diff, truncated: preview.diffTruncated });
         if(options.dryRun || changed===original)return preview;
+        if (writeMode === 'inPlace' && !options.expectedSha256) throw new Error('inPlace requires expectedSha256 from a fresh preview');
         const info = await stat(sftp, resolved);
         const temp = `${resolved}.ssh-agent-${randomUUID()}`;
         let backupPath: string | undefined;
         try {
-          await write(sftp, temp, changed, 'wx', info.mode & 0o777);
+          if (writeMode === 'atomic') await write(sftp, temp, changed, 'wx', info.mode & 0o777);
           if (await text(sftp, resolved) !== original) throw new Error('File changed during edit; retry after reading it');
-          if(options.backup){
+          if(options.backup || writeMode === 'inPlace'){
             backupPath = await this.checked(sftp, `${resolved}.ssh-agent-backup-${randomUUID()}`, name, true);
             // Backup creation is exclusive and private; failure leaves the original untouched.
             await write(sftp, backupPath, original, 'wx', 0o600);
             if (await text(sftp, resolved) !== original) throw new Error('File changed while backing up; preview again');
           }
-          // Require atomic replacement; do not delete the original as a fallback.
-          await new Promise<void>((resolve, reject) => sftp.ext_openssh_rename(temp, resolved, e => e ? reject(e) : resolve()));
+          if (writeMode === 'inPlace') {
+            await rewriteInPlace(sftp, resolved, original, changed);
+          } else {
+            // Require atomic replacement; do not delete the original as a fallback.
+            await new Promise<void>((resolve, reject) => sftp.ext_openssh_rename(temp, resolved, e => e ? reject(e) : resolve()));
+          }
           return { ...preview, edited:p, backupPath };
         } catch(error) {
-          if(backupPath)throw new Error(`${(error as Error).message}; backup may be present at ${backupPath}`);
+          if(backupPath)throw new Error(`${(error as Error).message}; ${writeMode === 'inPlace' ? 'inPlace write may be partial; ' : ''}backup may be present at ${backupPath}`);
           throw error;
         } finally {
-          await new Promise<void>(resolve => sftp.unlink(temp, () => resolve()));
+          if (writeMode === 'atomic') await new Promise<void>(resolve => sftp.unlink(temp, () => resolve()));
         }
       });
       this.locks.set(key, work);
@@ -163,7 +198,8 @@ export class RemoteFiles {
         let content: string;
         try { content = await text(sftp, full, options.maxFileBytes); scannedBytes += Buffer.byteLength(content); }
         catch { skipped.push(relative); return; }
-        const found = await engine.match(content, query, options, Math.max(1,maxResults-results.length));
+        const buffer = Buffer.from(content);
+        const found = await engine.match(redactByteSlice(buffer, 0, buffer.length), query, options, Math.max(1,maxResults-results.length));
         if (!found.count) return;
         if (options.outputMode === 'files') results.push({path:full});
         else if (options.outputMode === 'count') results.push({path:full,count:found.count});
@@ -197,6 +233,7 @@ export class RemoteFiles {
     }); } finally { engine.close(); }
   }
   async sync(localRoot: string, remoteRoot: string, direction: 'upload' | 'download', dryRun = true, name?: string, exclude: string[] = [], options: SyncOptions & { engine?: 'sftp'|'rsync' } = {}) {
+    assertUnrestricted(this.manager.getConfig(name), 'File sync');
     if (options.engine === 'rsync' || options.deleteExtra) return rsyncTransfer(this.manager,localRoot,remoteRoot,direction,dryRun,name,exclude,options);
     const local = this.manager.validateLocalPath(localRoot, name, direction === 'upload' ? 'read' : 'write');
     return this.manager.withSftp(name, async sftp => {

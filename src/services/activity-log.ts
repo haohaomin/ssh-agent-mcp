@@ -1,3 +1,4 @@
+import { redactText } from '../utils/output-redaction.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -8,12 +9,12 @@ export type ActivityRecord = {
   id: string; operation: string; source: 'mcp' | 'web' | 'monitor'; connectionName?: string;
   startedAt: string; updatedAt: string; finishedAt?: string; status: ActivityStatus;
   input: string; output: string; result?: string; diff?: string; truncated?: boolean;
-  sessionName?: string; jobId?: string; jobState?: string;
+  sessionName?: string; sessionInstance?: string; jobId?: string; jobState?: string;
 };
 const LIMIT = 24000;
 const MAX_RECORDS = 200;
 const sensitive = /password|passphrase|privatekey|authorization|secret|token|api[_-]?key/i;
-const context = new AsyncLocalStorage<{ log: ActivityLog; id: string }>();
+const context = new AsyncLocalStorage<{ log: ActivityLog; id: string; failed?: boolean }>();
 
 /** Bounded local operation history. Only sanitized snapshots ever reach disk or subscribers. */
 export class ActivityLog {
@@ -40,7 +41,11 @@ export class ActivityLog {
             record.input = '{}'; delete record.connectionName;
           }
           // Requests cannot survive a process restart. Remote jobs/sessions are rechecked by the monitor.
-          if (record.status === 'running' && !record.jobId && !record.sessionName) record.status = 'interrupted';
+          if (record.status === 'running' && !record.jobId && record.operation !== 'session_output') {
+            record.status = 'interrupted';
+            record.finishedAt = new Date().toISOString();
+            this.dirty = true;
+          }
           return record;
         });
       }
@@ -48,7 +53,7 @@ export class ActivityLog {
   }
 
   private text(value: string, streaming = false): string {
-    let result = value;
+    let result = redactText(value, streaming);
     for (const secret of this.secrets().filter(Boolean).sort((a, b) => b.length - a.length)) {
       result = result.split(secret).join('[redacted]');
       // Hold back a trailing fragment when a credential is split across SSH chunks.
@@ -112,6 +117,11 @@ export class ActivityLog {
   detail(patch: Partial<ActivityRecord>) {
     const active = context.getStore(); if (active?.log === this) this.update(active.id, patch);
   }
+  /** Preserve a failure that a tool deliberately returns as a normal MCP text result. */
+  markFailed() {
+    const active = context.getStore();
+    if (active?.log === this) active.failed = true;
+  }
   async run<T>(operation: string, source: ActivityRecord['source'], args: any, connectionName: string | undefined, work: () => Promise<T> | T, after?: (id: string, result: T) => void): Promise<T> {
     const id = this.start(operation, source, args, connectionName);
     return context.run({ log: this, id }, async () => {
@@ -120,8 +130,7 @@ export class ActivityLog {
         const value: any = result;
         const output = Array.isArray(value?.content) ? value.content.filter((item: any) => item.type === 'text').map((item: any) => item.text).join('\n') : value;
         const serialized = this.serialize(output);
-        const nonzero = typeof output === 'string' && /\[exit code\]\s+(-?\d+)/.exec(output);
-        const failed = value?.isError || value?.ok === false || (nonzero && Number(nonzero[1]) !== 0) || (typeof output === 'string' && /\[signal\]|Command terminated by signal/.test(output));
+        const failed = value?.isError || value?.ok === false || context.getStore()?.failed;
         this.update(id, { status: failed ? 'failed' : 'succeeded', result: serialized, finishedAt: new Date().toISOString() }, true);
         if (!failed) { try { after?.(id, result); } catch {} }
         return result;
@@ -148,9 +157,26 @@ export class ActivityLog {
     try {
       fs.mkdirSync(path.dirname(this.file), { recursive: true, mode: 0o700 });
       fs.writeFileSync(temp, JSON.stringify(this.records), { mode: 0o600, flag: 'wx' });
-      fs.renameSync(temp, this.file); this.storageError = undefined;
-    } catch { this.storageError = '历史记录写入失败；当前页面仍可实时查看'; this.emit({ type: 'storage-error' }); }
+      fs.renameSync(temp, this.file);
+      const recovered = Boolean(this.storageError);
+      this.storageError = undefined;
+      if (recovered) this.emit({ type: 'storage-recovered' });
+    } catch {
+      this.dirty = true;
+      this.storageError = '历史记录写入失败；当前页面仍可实时查看';
+      this.emit({ type: 'storage-error' });
+      // Retain unsaved records and retry under the same one-second write limit.
+      // A final close flush must not schedule work after shutdown.
+      if (!this.closed) this.schedule();
+    }
     finally { try { fs.rmSync(temp, { force: true }); } catch {} }
   }
-  close() { if (this.timer) clearTimeout(this.timer); this.flush(); this.closed = true; this.emit({ type: 'closed' }); this.listeners.clear(); }
+  close() {
+    if (this.closed) return;
+    this.closed = true;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = undefined;
+    this.flush();
+    this.emit({ type: 'closed' }); this.listeners.clear();
+  }
 }

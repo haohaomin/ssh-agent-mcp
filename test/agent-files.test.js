@@ -90,7 +90,7 @@ test('SFTP sync previews, uploads changes and is idempotent using size and mtime
     Object.defineProperty(info,'mtime',{value:Math.floor(info.mtimeMs/1000)});Object.defineProperty(info,'atime',{value:Math.floor(info.atimeMs/1000)});cb(null,info);
   });
   sftp.mkdir=fs.mkdir;sftp.utimes=fs.utimes;
-  const manager={withSftp:async(_n,f)=>f(sftp),validateLocalPath:p=>p,validateRemotePath:p=>p,upload:async(l,r)=>fs.promises.copyFile(l,r),download:async(r,l)=>fs.promises.copyFile(r,l)};
+  const manager={getConfig:()=>({}),withSftp:async(_n,f)=>f(sftp),validateLocalPath:p=>p,validateRemotePath:p=>p,upload:async(l,r)=>fs.promises.copyFile(l,r),download:async(r,l)=>fs.promises.copyFile(r,l)};
   const files=new RemoteFiles(manager);
   const preview=await files.sync(local,remote,'upload');assert.equal(preview.actions.length,2);assert.ok(!fs.existsSync(path.join(remote,'nested')));
   await files.sync(local,remote,'upload',false);assert.equal(fs.readFileSync(path.join(remote,'nested','file'),'utf8'),'payload');assert.ok(fs.existsSync(path.join(remote,'keep')));
@@ -108,7 +108,7 @@ test('search and sync exclusions avoid traversing excluded trees', async t => {
   assert.equal((await files.search(root,'needle','grep')).results.length,1);
   assert.equal((await files.search(root,'needle','grep',100,undefined,[],{includeHidden:true})).results.length,2);
   const local=path.join(root,'local'),remote=path.join(root,'remote');fs.mkdirSync(local);fs.mkdirSync(remote);fs.symlinkSync('/etc',path.join(local,'excluded'));
-  const manager={withSftp:async(_n,f)=>f(sftp),validateLocalPath:p=>p,validateRemotePath:p=>p};
+  const manager={getConfig:()=>({}),withSftp:async(_n,f)=>f(sftp),validateLocalPath:p=>p,validateRemotePath:p=>p};
   assert.deepEqual((await new RemoteFiles(manager).sync(local,remote,'upload',true,undefined,['excluded'])).actions,[]);
 });
 test('regular expressions, count/file modes, context and complete glob alternatives', async t => {
@@ -120,4 +120,15 @@ test('regular expressions, count/file modes, context and complete glob alternati
   const paths=await files.search(root,'Hello','grep',100,undefined,[],{outputMode:'files'});assert.equal(paths.results.length,2);
   const context=await files.search(path.join(root,'a.ts'),'Hello','grep',100,undefined,[],{contextBefore:1,contextAfter:1});assert.equal(context.results.length,3);assert.equal(context.results[0].match,false);
   await assert.rejects(files.search(root,'[','grep',100,undefined,[],{regex:true}),/regular expression/i);
+});
+
+test('inPlace failure preserves a private backup, reports partial write and never swaps the inode', async t => {
+  const {root,files,sftp}=setup(t),p=path.join(root,'text');const original='original content';fs.writeFileSync(p,original);
+  Object.assign(sftp,{open:fs.open,close:fs.close,fstat:fs.fstat,read:fs.read,write:fs.write,
+    fsetstat(_handle,_attributes,callback){callback(new Error('injected truncation failure'));}});
+  const inode=fs.statSync(p).ino;
+  const preview=await files.edit(p,[{oldText:original,newText:'x'}],undefined,{dryRun:true});
+  await assert.rejects(files.edit(p,[{oldText:original,newText:'x'}],undefined,{writeMode:'inPlace',expectedSha256:preview.beforeSha256}),/inPlace write may be partial; backup/);
+  assert.equal(fs.statSync(p).ino,inode);assert.equal(fs.readFileSync(p,'utf8'),'xriginal content');
+  const backup=fs.readdirSync(root).find(n=>n.includes('.ssh-agent-backup-'));assert.ok(backup);assert.equal(fs.readFileSync(path.join(root,backup),'utf8'),original);
 });

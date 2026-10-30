@@ -127,6 +127,8 @@ export class ActivityPanel {
       $('#activity-storage').hidden = !event.storageError; $('#activity-storage').textContent = event.storageError || '';
     } else if (event.type === 'storage-error') {
       $('#activity-storage').hidden = false; $('#activity-storage').textContent = '历史记录写入失败；当前页面仍可实时查看';
+    } else if (event.type === 'storage-recovered') {
+      $('#activity-storage').hidden = true; $('#activity-storage').textContent = '';
     } else if (event.type === 'upsert') {
       for (const id of event.removed || []) this.records.delete(id);
       this.records.set(event.record.id, event.record);
