@@ -1,6 +1,20 @@
 # 全面功能测试报告
 
 
+
+## 2026-10-31：阿里云真实主机验收
+
+使用当前 `origin/main` 的构建连接 `aliyun-server`，所有写入限定在 `/tmp/ssh-agent-eval.jAXGyf` 随机临时目录，结束后已核对删除；本地上传/下载文件也已清理。
+
+- 连接诊断、SFTP、OpenSSH 收尾诊断、脚本 stdin 原样投递、JSON/引号、Python、步骤失败即停、输出预算和 `sudo -n` 均通过。
+- 原子文件编辑的 inode 替换、`inPlace` 的 inode/硬链接保持、缩短文件、私有备份和权限均通过。
+- 后台任务完成/轮询、`resourceKey` 冲突退出 75、1 MiB 上传下载逐字节摘要一致、同机 SFTP relay、显式目标的 `ssh_exec_many` 失败隔离均通过。
+- 持久终端创建、cwd、游标读取、resize、停止和日志保留通过；读取必须把上次返回的 `nextOffsetChars` 传给下一次 `ssh_session_read`，从 0 重读只会再次看到欢迎信息。
+- 本机配置的阿里云主机以 root 登录，`sudo -n` 可用；远端存在 Python、Docker、flock、base64、sha256sum，未安装 rsync，因此 rsync 引擎不适合作为该主机的默认同步方式，应选择 SFTP。
+- 本轮没有修改生产服务、防火墙、Docker Compose 或持久配置；端口转发仅短暂转发远端 127.0.0.1:22 并已停止。
+
+结论：当前构建满足这组真实运维路径；后续使用阿里云时优先 `ssh_sync(engine="sftp")`，长驻终端按游标增量读取，配置文件 bind mount 使用 `writeMode="inPlace"`。本轮没有留下未解决的代码级失败。
+
 ## 2026-10-30：输出脱敏、inode 保留、收尾诊断与多机执行
 
 完整回归 **486 项通过，0 失败、0 跳过**；工具增加为 33 个，ssh2/OpenSSH 两种后端通过真实 MCP stdio 逐一调用。
