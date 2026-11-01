@@ -74,6 +74,8 @@ node build/index.js --config-file servers.json
 
 `allowedLocalPaths` 与 `allowedRemotePaths` 控制文件访问范围。配置远端限制时，SFTP 文件读写和传输会检查符号链接解析后的实际路径；新目标校验其父目录，无法安全解析的悬空链接会被拒绝。命令规则使用 `commandWhitelist` / `commandBlacklist`。任意交互 shell 与 rsync 不能在配置了命令过滤的连接上使用；文件操作可使用 SFTP。SSH 账户本身的系统权限仍由远端控制。
 
+`sftpTimeoutMs` 是 SFTP 建立和传输的最小超时，默认 300 秒。对能取得文件大小的上传、下载，服务会按大小自动把传输超时延长，避免低带宽主机上的大文件在固定时间点失败；工具调用还可以用 `timeoutMs` 提高这个下限。传输超时会关闭当前 SFTP 通道并保留 SSH 连接，因此同一连接上的持久会话和端口转发不会被无关的文件传输拖掉。
+
 `ssh_exec` 在配置任意命令过滤规则时禁止非空 `env`、非空 `envFromRemoteFiles` 和 `sudo: true`，避免环境变量或提权改变允许命令的执行含义；白名单连接还禁止 `script` / `steps`。`envFromRemoteFiles` 只支持绝对 POSIX 路径，配置远端路径范围时用 SFTP 元数据检查实际路径，文件值仍仅在远端读取。脚本、步骤和远端文件注入需要 `transportMode: "exec"`。
 
 ## 认证与环境变量

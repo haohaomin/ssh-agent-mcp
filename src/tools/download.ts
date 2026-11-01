@@ -18,12 +18,13 @@ export function registerDownloadTool(server: McpServer): void {
       inputSchema: {
         remotePath: z.string().describe("Remote path (POSIX absolute like /home/user/file.txt, or Windows drive-absolute like C:/Users/file.txt)"),
         localPath: z.string().describe("Local path"),
+        timeoutMs: z.number().int().positive().max(7 * 24 * 60 * 60 * 1000).optional().describe("SFTP operation timeout. Large files automatically extend the configured timeout by size; this value is the minimum."),
         connectionName,
       },
     },
-    async ({ remotePath, localPath, connectionName }) => {
+    async ({ remotePath, localPath, timeoutMs, connectionName }) => {
       try {
-        const result = await sshManager.download(remotePath, localPath, connectionName);
+        const result = await sshManager.download(remotePath, localPath, connectionName, timeoutMs);
         return {
           content: [{ type: "text", text: result }],
         };

@@ -1,5 +1,6 @@
 import { redactByteSlice, redactText } from '../utils/output-redaction.js';
 import { assertUnrestricted } from '../utils/execution-policy.js';
+import { ToolError } from '../utils/tool-error.js';
 import { rsyncTransfer, type SyncOptions } from './rsync.js';
 import picomatch from 'picomatch';
 import { SearchMatcher, type SearchOptions } from '../utils/search-matcher.js';
@@ -130,11 +131,19 @@ export class RemoteFiles {
     return this.edit(p, [], name, { ...options, expectedSha256 }, content);
   }
   async create(p: string, content: string, name?: string, permissions = 0o644) {
-    return this.manager.withSftp(name, async sftp => {
-      const resolved = await this.checked(sftp, p, name, true);
-      await write(sftp, resolved, content, 'wx', permissions);
-      return { created: p, bytes: Buffer.byteLength(content) };
-    });
+    try {
+      return await this.manager.withSftp(name, async sftp => {
+        const resolved = await this.checked(sftp, p, name, true);
+        await write(sftp, resolved, content, 'wx', permissions);
+        return { created: p, bytes: Buffer.byteLength(content) };
+      });
+    } catch (error) {
+      const code = (error as {code?: unknown})?.code;
+      if (code === 'EEXIST' || code === 4 || /(?:already exists|file exists)/i.test((error as Error).message || '')) {
+        throw new ToolError('REMOTE_FILE_EXISTS', `Remote file already exists: ${p}. Use mode=overwrite or choose another path.`, false);
+      }
+      throw error;
+    }
   }
   async edit(p: string, edits: { oldText: string; newText: string }[], name?: string, options: EditOptions = {}, replacement?: string) {
     return this.manager.withSftp(name, async sftp => {

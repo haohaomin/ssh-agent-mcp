@@ -67,6 +67,12 @@ Download a file, or a whole remote directory (recursively; symlinks skipped, max
       "type": "string",
       "description": "Local path"
     },
+    "timeoutMs": {
+      "description": "SFTP operation timeout. Large files automatically extend the configured timeout by size; this value is the minimum.",
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 604800000
+    },
     "connectionName": {
       "description": "Configured connection name. Required when multiple connections exist; may be omitted only for a single connection",
       "type": "string",
@@ -496,6 +502,13 @@ Run the same command/script/steps/action on 1–16 explicitly named connections 
       "type": "integer",
       "minimum": 1,
       "maximum": 8
+    },
+    "perTargetTimeoutMs": {
+      "default": 10000,
+      "description": "Independent timeout for each target; a timed-out target releases its concurrency slot while other targets continue.",
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 86400000
     },
     "maxTotalBytes": {
       "default": 65536,
@@ -2030,6 +2043,12 @@ Upload a file, or a whole directory (recursively; symlinks skipped, max 2000 fil
     "remotePath": {
       "type": "string",
       "description": "Remote path (POSIX absolute like /home/user/file.txt, or Windows drive-absolute like C:/Users/file.txt)"
+    },
+    "timeoutMs": {
+      "description": "SFTP operation timeout. Large files automatically extend the configured timeout by size; this value is the minimum.",
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 604800000
     },
     "connectionName": {
       "description": "Configured connection name. Required when multiple connections exist; may be omitted only for a single connection",

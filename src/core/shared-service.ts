@@ -11,7 +11,7 @@ import { stateDirectory } from '../services/durable-sessions.js';
 import { Logger } from '../utils/logger.js';
 
 export interface SharedService {
-  id: string; key: string; pid: number; endpoint: string; ui: string; token: string;
+  id: string; key: string; scopeKey?: string; pid: number; endpoint: string; ui: string; token: string;
 }
 const worker = fileURLToPath(new URL('./shared-worker.js', import.meta.url));
 const management = (service: SharedService) => new URL('/.well-known/ssh-agent-mcp', service.endpoint);
@@ -34,7 +34,7 @@ function buildIdentity(): string {
   visit(fileURLToPath(new URL('../', import.meta.url)));
   return hash.digest('hex');
 }
-export function serviceKey(args: string[]): string {
+export function serviceScopeKey(args: string[]): string {
   const parsed = CommandLineParser.parseArgs(args);
   // cwd is also an allowed local file root. Never combine different permissions.
   const sources: string[] = [];
@@ -47,7 +47,12 @@ export function serviceKey(args: string[]): string {
   return createHash('sha256').update(canonical({ configs: parsed.configs, cwd: fs.realpathSync(process.cwd()), sources,
     defaultConnection: Object.keys(parsed.configs)[0],
     importSsh: args.includes('--import-ssh-config'), agent: process.env.SSH_AUTH_SOCK,
-    token: parsed.http.token, httpPath: parsed.http.path, uiPath: parsed.uiPath, build: buildIdentity(),
+    token: parsed.http.token, httpPath: parsed.http.path, uiPath: parsed.uiPath,
+  })).digest('hex').slice(0,32);
+}
+export function serviceKey(args: string[]): string {
+  const scopeKey = serviceScopeKey(args);
+  return createHash('sha256').update(canonical({ scopeKey, build: buildIdentity(),
   })).digest('hex').slice(0,32);
 }
 export function readService(filename: string): SharedService | undefined {
@@ -70,6 +75,7 @@ function alivePid(pid: number): boolean { try { process.kill(pid,0); return true
 export async function ensureService(args: string[]): Promise<SharedService> {
   const parsed = CommandLineParser.parseArgs(args);
   if (!['127.0.0.1','localhost','::1'].includes(parsed.http.host)) throw new Error('Shared service is local-only. Use --standalone for an explicit network listener.');
+  const scopeKey = serviceScopeKey(args);
   const key = serviceKey(args), dir = directory(), filename = path.join(dir,key+'.json'), lock = path.join(dir,key+'.lock');
   const deadline = Date.now()+20000;
   while (Date.now()<deadline) {
@@ -91,6 +97,15 @@ export async function ensureService(args: string[]): Promise<SharedService> {
       try {
         const raced = readService(filename);
         if (raced && await serviceAlive(raced)) return raced;
+        // A build change deliberately changes serviceKey so new clients load
+        // the new code. Reap older live workers for the same permission/config
+        // scope before starting the replacement; unrelated projects remain
+        // isolated by scopeKey.
+        for (const item of fs.readdirSync(dir).filter(name => name.endsWith('.json') && name !== path.basename(filename))) {
+          const oldFile = path.join(dir, item), old = readService(oldFile);
+          if (!old || old.scopeKey !== scopeKey || !await serviceAlive(old)) continue;
+          try { await fetch(management(old), {method:'DELETE', headers:headers(old), signal:AbortSignal.timeout(3000), redirect:'error'}); } catch {}
+        }
         const id = randomBytes(24).toString('hex'), token = parsed.http.token || randomBytes(32).toString('hex');
         const logPath = path.join(dir,key+'.log');
         // Keep startup logs bounded between launches.
@@ -105,7 +120,7 @@ export async function ensureService(args: string[]): Promise<SharedService> {
             if (message?.ready) { clearTimeout(timer); resolve(message.ready); }
             else if (message?.error) { clearTimeout(timer); reject(new Error(message.error)); }
           });
-          child.send({ args, id, key, token, filename });
+          child.send({ args, id, key, scopeKey, token, filename });
         });
         child.disconnect(); child.unref();
         return result;

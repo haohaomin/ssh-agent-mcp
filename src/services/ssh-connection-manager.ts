@@ -48,6 +48,7 @@ type RunCommandOptions = {
   resourceKey?: string;
   action?: string;
   timeout?: number;
+  connectionTimeoutMs?: number;
   prevalidatedInternalCommand?: boolean;
   env?: Record<string, string>;
   script?: string;
@@ -124,6 +125,9 @@ const DEFAULT_JOB_OUTPUT_BYTES = 64 * 1024;
 const DEFAULT_KEEPALIVE_INTERVAL_MS = 10000;
 const DEFAULT_KEEPALIVE_COUNT_MAX = 3;
 const DEFAULT_SFTP_TIMEOUT_MS = 300000;
+// Conservative floor used only to extend a timeout for a known large file.
+// It does not change fastGet/fastPut throughput.
+const MIN_EXPECTED_SFTP_BYTES_PER_SEC = 32 * 1024;
 const DEFAULT_MAX_OUTPUT_BYTES = 10 * 1024 * 1024;
 const DEFAULT_READ_FILE_BYTES = 64 * 1024;
 const MAX_DIRECTORY_TRANSFER_FILES = 2000;
@@ -501,7 +505,7 @@ export class SSHConnectionManager {
   /**
    * Connect to SSH with specified name
    */
-  public async connect(name?: string): Promise<void> {
+  public async connect(name?: string, timeoutOverrideMs?: number): Promise<void> {
     const key = name || this.defaultName;
     if (this.disconnecting.has(key)) throw new Error("Connection is disconnecting; retry shortly");
     this.manuallyDisconnected.delete(key);
@@ -519,7 +523,7 @@ export class SSHConnectionManager {
     const client = config.backend === "openssh" ? new OpenSshClient(config) as unknown as Client : this.createClient();
     const connectionPromise = new Promise<void>(async (resolve, reject) => {
       let settled = false;
-      const timeoutMs = this.getConnectionTimeoutMs(config);
+      const timeoutMs = timeoutOverrideMs ?? this.getConnectionTimeoutMs(config);
       const timeoutId = setTimeout(() => {
         rejectOnce(
           new ToolError(
@@ -819,7 +823,7 @@ export class SSHConnectionManager {
         return path.posix.join(await resolve(parent, depth + 1), path.posix.basename(candidate));
       }
     };
-    const resolved = await this.withTimeout(resolve(requested), this.getSftpTimeoutMs(config), () => this.invalidateConnection(name || this.defaultName), 'SFTP path resolution timed out');
+    const resolved = await this.withTimeout(resolve(requested), this.getSftpTimeoutMs(config), () => {}, 'SFTP path resolution timed out');
     return this.validateRemotePath(resolved, name);
   }
 
@@ -974,10 +978,10 @@ export class SSHConnectionManager {
     localPath: string,
     remotePath: string,
     name?: string,
+    timeoutOverrideMs?: number,
   ): Promise<string> {
     const config = this.getConfig(name);
     this.assertSftpAllowed(config);
-    const key = name || this.defaultName;
     if (this.getTransportMode(config) === "shell") {
       throw new ToolError(
         "UNSUPPORTED_IN_SHELL_MODE",
@@ -993,15 +997,14 @@ export class SSHConnectionManager {
       .stat(validatedLocalPath)
       .catch(() => undefined);
     if (localStats?.isDirectory()) {
-      return this.uploadDirectory(validatedLocalPath, validatedRemotePath, name);
+      return this.uploadDirectory(validatedLocalPath, validatedRemotePath, name, timeoutOverrideMs);
     }
 
     const client = await this.ensureConnected(name);
-    const sftpTimeoutMs = this.getSftpTimeoutMs(config);
-    const sftp = await this.withTimeout(
-      this.openSftp(client),
+    const sftpTimeoutMs = this.getSftpTimeoutMs(config, timeoutOverrideMs);
+    const sftp = await this.openSftpWithTimeout(
+      client,
       sftpTimeoutMs,
-      () => this.invalidateConnection(key),
       `SFTP open timed out after ${sftpTimeoutMs}ms`,
     );
 
@@ -1010,6 +1013,7 @@ export class SSHConnectionManager {
       const localSize = await this.getLocalSizeForFastTransfer(
         validatedLocalPath,
       );
+      const transferTimeoutMs = this.getSftpTimeoutMs(config, timeoutOverrideMs, localSize);
 
       if (localSize === undefined) {
         await this.withTimeout(
@@ -1017,9 +1021,9 @@ export class SSHConnectionManager {
             fs.createReadStream(validatedLocalPath),
             sftp.createWriteStream(validatedRemotePath),
           ),
-          sftpTimeoutMs,
-          () => this.invalidateConnection(key),
-          `SFTP upload timed out after ${sftpTimeoutMs}ms`,
+          transferTimeoutMs,
+          () => this.closeSftp(sftp),
+          `SFTP upload timed out after ${transferTimeoutMs}ms`,
         );
       } else {
         await this.withTimeout(
@@ -1031,17 +1035,16 @@ export class SSHConnectionManager {
               (err) => (err ? reject(err) : resolve()),
             );
           }),
-          sftpTimeoutMs,
-          () => this.invalidateConnection(key),
-          `SFTP upload timed out after ${sftpTimeoutMs}ms`,
+          transferTimeoutMs,
+          () => this.closeSftp(sftp),
+          `SFTP upload timed out after ${transferTimeoutMs}ms`,
         );
         await this.appendUploadTail(
           sftp,
           validatedLocalPath,
           validatedRemotePath,
           localSize,
-          sftpTimeoutMs,
-          key,
+          transferTimeoutMs,
         );
       }
       return "File uploaded successfully";
@@ -1073,10 +1076,10 @@ export class SSHConnectionManager {
     remotePath: string,
     localPath: string,
     name?: string,
+    timeoutOverrideMs?: number,
   ): Promise<string> {
     const config = this.getConfig(name);
     this.assertSftpAllowed(config);
-    const key = name || this.defaultName;
     if (this.getTransportMode(config) === "shell") {
       throw new ToolError(
         "UNSUPPORTED_IN_SHELL_MODE",
@@ -1088,11 +1091,10 @@ export class SSHConnectionManager {
     const validatedLocalPath = this.validateLocalPath(localPath, name, "write");
     let validatedRemotePath = this.validateRemotePath(remotePath, name);
     const client = await this.ensureConnected(name);
-    const sftpTimeoutMs = this.getSftpTimeoutMs(config);
-    const sftp = await this.withTimeout(
-      this.openSftp(client),
+    const sftpTimeoutMs = this.getSftpTimeoutMs(config, timeoutOverrideMs);
+    const sftp = await this.openSftpWithTimeout(
+      client,
       sftpTimeoutMs,
-      () => this.invalidateConnection(key),
       `SFTP open timed out after ${sftpTimeoutMs}ms`,
     );
     const tempLocalPath = `${validatedLocalPath}.tmp-${process.pid}-${Date.now()}-${Math.random()
@@ -1110,6 +1112,7 @@ export class SSHConnectionManager {
           validatedRemotePath,
           validatedLocalPath,
           name,
+          timeoutOverrideMs,
         );
       }
 
@@ -1117,8 +1120,8 @@ export class SSHConnectionManager {
         sftp,
         validatedRemotePath,
         sftpTimeoutMs,
-        key,
       );
+      const transferTimeoutMs = this.getSftpTimeoutMs(config, timeoutOverrideMs, remoteSize);
 
       if (remoteSize === undefined) {
         await this.withTimeout(
@@ -1126,9 +1129,9 @@ export class SSHConnectionManager {
             sftp.createReadStream(validatedRemotePath),
             fs.createWriteStream(tempLocalPath, { flags: "wx" }),
           ),
-          sftpTimeoutMs,
-          () => this.invalidateConnection(key),
-          `SFTP download timed out after ${sftpTimeoutMs}ms`,
+          transferTimeoutMs,
+          () => this.closeSftp(sftp),
+          `SFTP download timed out after ${transferTimeoutMs}ms`,
         );
       } else {
         // fastGet opens the destination with "w", which would drop the
@@ -1144,16 +1147,15 @@ export class SSHConnectionManager {
               (err) => (err ? reject(err) : resolve()),
             );
           }),
-          sftpTimeoutMs,
-          () => this.invalidateConnection(key),
-          `SFTP download timed out after ${sftpTimeoutMs}ms`,
+          transferTimeoutMs,
+          () => this.closeSftp(sftp),
+          `SFTP download timed out after ${transferTimeoutMs}ms`,
         );
         await this.appendDownloadTail(
           sftp,
           validatedRemotePath,
           tempLocalPath,
-          sftpTimeoutMs,
-          key,
+          transferTimeoutMs,
         );
       }
       await fs.promises.rename(tempLocalPath, validatedLocalPath);
@@ -1184,8 +1186,8 @@ export class SSHConnectionManager {
   }
 
   public async withSftp<T>(name: string | undefined, operation: (sftp: SFTPWrapper) => Promise<T>): Promise<T> {
-    const { sftp, key, timeoutMs } = await this.openSftpFor(name);
-    try { return await this.withTimeout(operation(sftp), timeoutMs, () => { this.closeSftp(sftp); this.invalidateConnection(key); }, "SFTP operation timed out"); }
+    const { sftp, timeoutMs } = await this.openSftpFor(name);
+    try { return await this.withTimeout(operation(sftp), timeoutMs, () => this.closeSftp(sftp), "SFTP operation timed out"); }
     finally { this.closeSftp(sftp); }
   }
 
@@ -1200,7 +1202,7 @@ export class SSHConnectionManager {
     }
   }
 
-  private async openSftpFor(name?: string): Promise<{
+  private async openSftpFor(name?: string, timeoutOverrideMs?: number): Promise<{
     sftp: SFTPWrapper;
     key: string;
     timeoutMs: number;
@@ -1209,14 +1211,29 @@ export class SSHConnectionManager {
     this.assertSftpAllowed(config);
     const key = name || this.defaultName;
     const client = await this.ensureConnected(name);
-    const timeoutMs = this.getSftpTimeoutMs(config);
-    const sftp = await this.withTimeout(
-      this.openSftp(client),
+    const timeoutMs = this.getSftpTimeoutMs(config, timeoutOverrideMs);
+    const sftp = await this.openSftpWithTimeout(
+      client,
       timeoutMs,
-      () => this.invalidateConnection(key),
       `SFTP open timed out after ${timeoutMs}ms`,
     );
     return { sftp, key, timeoutMs };
+  }
+
+  private async openSftpWithTimeout(client: Client, timeoutMs: number, message: string): Promise<SFTPWrapper> {
+    let timedOut = false;
+    const opening = this.openSftp(client).then(sftp => {
+      // The callback may arrive after the timeout has already been returned
+      // to the caller. Retire that late channel without closing the SSH client.
+      if (timedOut) this.closeSftp(sftp);
+      return sftp;
+    });
+    try {
+      return await this.withTimeout(opening, timeoutMs, () => { timedOut = true; }, message);
+    } catch (error) {
+      timedOut = true;
+      throw error;
+    }
   }
 
   /**
@@ -1238,7 +1255,7 @@ export class SSHConnectionManager {
       const stats = await this.withTimeout(
         this.statRemote(sftp, validatedRemotePath),
         timeoutMs,
-        () => this.invalidateConnection(key),
+        () => this.closeSftp(sftp),
         `SFTP stat timed out after ${timeoutMs}ms`,
       );
       if (stats.isDirectory()) {
@@ -1269,7 +1286,7 @@ export class SSHConnectionManager {
             },
           ),
           timeoutMs,
-          () => this.invalidateConnection(key),
+          () => this.closeSftp(sftp),
           `SFTP read timed out after ${timeoutMs}ms`,
         );
       }
@@ -1326,7 +1343,7 @@ export class SSHConnectionManager {
           }),
         ),
         timeoutMs,
-        () => this.invalidateConnection(key),
+        () => this.closeSftp(sftp),
         `SFTP write timed out after ${timeoutMs}ms`,
       );
       return `${options.append ? "Appended" : "Wrote"} ${data.length} bytes to ${validatedRemotePath}`;
@@ -1379,6 +1396,7 @@ export class SSHConnectionManager {
     localDir: string,
     remoteDir: string,
     name?: string,
+    timeoutOverrideMs?: number,
   ): Promise<string> {
     const files: Array<{ local: string; remote: string }> = [];
     const dirs: string[] = [remoteDir];
@@ -1416,7 +1434,7 @@ export class SSHConnectionManager {
         await this.withTimeout(
           this.mkdirRemote(sftp, validatedDir),
           timeoutMs,
-          () => this.invalidateConnection(key),
+          () => this.closeSftp(sftp),
           `SFTP mkdir timed out after ${timeoutMs}ms`,
         );
       }
@@ -1435,7 +1453,7 @@ export class SSHConnectionManager {
 
     for (const file of files) {
       try {
-        await this.upload(file.local, file.remote, name);
+        await this.upload(file.local, file.remote, name, timeoutOverrideMs);
       } catch (error) {
         throw new ToolError(
           (error as ToolError).code ?? "SFTP_ERROR",
@@ -1458,19 +1476,20 @@ export class SSHConnectionManager {
     remoteDir: string,
     localDir: string,
     name?: string,
+    timeoutOverrideMs?: number,
   ): Promise<string> {
     const files: Array<{ remote: string; local: string }> = [];
     const localDirs: string[] = [localDir];
     let skipped = 0;
     const key = name || this.defaultName;
-    const timeoutMs = this.getSftpTimeoutMs(this.getConfig(name));
+    const timeoutMs = this.getSftpTimeoutMs(this.getConfig(name), timeoutOverrideMs);
 
     const walk = async (remote: string, local: string): Promise<void> => {
       remote = await this.resolveRemotePath(sftp, remote, name);
       const entries = await this.withTimeout(
         this.readdirRemote(sftp, remote),
         timeoutMs,
-        () => this.invalidateConnection(key),
+        () => this.closeSftp(sftp),
         `SFTP readdir timed out after ${timeoutMs}ms`,
       );
       for (const { filename, attrs } of entries) {
@@ -1513,7 +1532,7 @@ export class SSHConnectionManager {
     }
     for (const file of files) {
       try {
-        await this.download(file.remote, file.local, name);
+        await this.download(file.remote, file.local, name, timeoutOverrideMs);
       } catch (error) {
         throw new ToolError(
           (error as ToolError).code ?? "SFTP_ERROR",
@@ -1567,18 +1586,17 @@ export class SSHConnectionManager {
     sftp: SFTPWrapper,
     remotePath: string,
     timeoutMs: number,
-    key: string,
   ): Promise<number | undefined> {
     let stats: Stats;
     try {
       stats = await this.withTimeout(
         this.statRemote(sftp, remotePath),
         timeoutMs,
-        () => this.invalidateConnection(key),
+        () => this.closeSftp(sftp),
         `SFTP stat timed out after ${timeoutMs}ms`,
       );
     } catch (error) {
-      // A timeout already tore the connection down, so it has to surface.
+      // A timeout closes the SFTP channel, so it has to surface.
       if (error instanceof ToolError) {
         throw error;
       }
@@ -1614,13 +1632,12 @@ export class SSHConnectionManager {
     remotePath: string,
     tempLocalPath: string,
     timeoutMs: number,
-    key: string,
   ): Promise<void> {
     const downloadedBytes = (await fs.promises.stat(tempLocalPath)).size;
     const stats = await this.withTimeout(
       this.statRemote(sftp, remotePath),
       timeoutMs,
-      () => this.invalidateConnection(key),
+      () => this.closeSftp(sftp),
       `SFTP stat timed out after ${timeoutMs}ms`,
     );
 
@@ -1634,7 +1651,7 @@ export class SSHConnectionManager {
         fs.createWriteStream(tempLocalPath, { flags: "a" }),
       ),
       timeoutMs,
-      () => this.invalidateConnection(key),
+      () => this.closeSftp(sftp),
       `SFTP download timed out after ${timeoutMs}ms`,
     );
   }
@@ -1649,7 +1666,6 @@ export class SSHConnectionManager {
     remotePath: string,
     sizeBeforeTransfer: number,
     timeoutMs: number,
-    key: string,
   ): Promise<void> {
     const currentLocalSize = (await fs.promises.stat(localPath)).size;
     if (currentLocalSize <= sizeBeforeTransfer) {
@@ -1659,7 +1675,7 @@ export class SSHConnectionManager {
     const stats = await this.withTimeout(
       this.statRemote(sftp, remotePath),
       timeoutMs,
-      () => this.invalidateConnection(key),
+      () => this.closeSftp(sftp),
       `SFTP stat timed out after ${timeoutMs}ms`,
     );
 
@@ -1673,7 +1689,7 @@ export class SSHConnectionManager {
         sftp.createWriteStream(remotePath, { flags: "a" }),
       ),
       timeoutMs,
-      () => this.invalidateConnection(key),
+      () => this.closeSftp(sftp),
       `SFTP upload timed out after ${timeoutMs}ms`,
     );
   }
@@ -1846,10 +1862,10 @@ export class SSHConnectionManager {
     return new Client();
   }
 
-  private async ensureConnected(name?: string): Promise<Client> {
+  private async ensureConnected(name?: string, timeoutOverrideMs?: number): Promise<Client> {
     const key = name || this.defaultName;
     if (!this.hasUsableConnection(key)) {
-      await this.connect(key);
+      await this.connect(key, timeoutOverrideMs);
     }
 
     const client = this.clients.get(key);
@@ -1895,8 +1911,15 @@ export class SSHConnectionManager {
     return config.connectionTimeoutMs || DEFAULT_CONNECTION_TIMEOUT_MS;
   }
 
-  private getSftpTimeoutMs(config: SSHConfig): number {
-    return config.sftpTimeoutMs || DEFAULT_SFTP_TIMEOUT_MS;
+  private getSftpTimeoutMs(config: SSHConfig, overrideMs?: number, sizeBytes?: number): number {
+    const configured = overrideMs ?? config.sftpTimeoutMs ?? DEFAULT_SFTP_TIMEOUT_MS;
+    if (!Number.isSafeInteger(configured) || configured <= 0) {
+      throw new ToolError("COMMAND_VALIDATION_FAILED", "SFTP timeout must be a positive safe integer", false);
+    }
+    const sizeBudget = sizeBytes === undefined
+      ? 0
+      : Math.ceil(sizeBytes / MIN_EXPECTED_SFTP_BYTES_PER_SEC) * 1000 + 30000;
+    return Math.max(configured, sizeBudget);
   }
 
   private getMaxOutputBytes(config: SSHConfig): number {
@@ -2678,10 +2701,13 @@ export class SSHConnectionManager {
       (transportMode === "shell"
         ? this.getShellCommandTimeoutMs(config)
         : this.getCommandTimeoutMs(config));
-    const connectionTimeoutMs = this.getConnectionTimeoutMs(config);
+    const connectionTimeoutMs = options.connectionTimeoutMs ?? this.getConnectionTimeoutMs(config);
+    if (!Number.isSafeInteger(connectionTimeoutMs) || connectionTimeoutMs <= 0) {
+      invalid("connectionTimeoutMs must be a positive safe integer");
+    }
     if (executionContext) executionContext.phase = 'connection';
     const client = await this.withTimeout(
-      this.ensureConnected(key),
+      this.ensureConnected(key, connectionTimeoutMs),
       connectionTimeoutMs,
       () => this.invalidateConnection(key),
       `SSH connection [${key}] timed out after ${connectionTimeoutMs}ms`,

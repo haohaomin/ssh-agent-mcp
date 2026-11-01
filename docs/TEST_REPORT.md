@@ -1,5 +1,16 @@
 # 全面功能测试报告
 
+## 2026-11-01：版本漂移、SFTP 超时与多目标超时修复
+
+本轮针对真实验收中发现的三个 P0/P1 问题完成修复并验证：共享服务按配置作用域回收旧 build；SFTP 对已知文件大小按保守带宽预算自动延长超时，且超时只关闭 SFTP 通道；`ssh_exec_many` 为每个目标同时设置命令和连接超时。上传/下载新增 `timeoutMs`，远端文件独占创建新增 `REMOTE_FILE_EXISTS`，文档和工具参考已同步。
+
+- 完整 `npm test`：**487 项通过，0 失败，0 跳过**；构建、工具参考生成和站点链接检查通过。
+- 阿里云 `aliyun-server` 真实连接：诊断和 SFTP 通过；脚本原样 stdin、上传/下载往返、SHA-256 校验、远端清理通过。
+- `ssh_exec_many` 实测 `aliyun-server` + 不可达 `server-2`，`perTargetTimeoutMs=2000` 在约 2 秒返回：阿里云成功，不可达目标返回 `SSH_CONNECTION_TIMEOUT`，不再等待默认 30 秒。
+- 已停止旧 shared service 并由当前 build 重新启动；服务状态只保留当前实例。
+
+本轮没有触碰生产服务、Docker、数据库或防火墙；测试文件写入 `/tmp` 临时路径并已清理。大文件吞吐未作改动，仍由 `fastGet/fastPut` 和实例公网带宽决定。
+
 
 
 ## 2026-10-31：阿里云真实主机验收

@@ -75,8 +75,11 @@ export const executeCommandInputSchema = {
           ),
       };
 
-export async function executeCommand({ resourceKey, action, command, script, steps, stopOnError, failFast, interpreter, sudo, maxBytes, cwd, env, envFromRemoteFiles, connectionName, timeoutMs }: z.infer<z.ZodObject<typeof executeCommandInputSchema>>) {
+export async function executeCommand({ resourceKey, action, command, script, steps, stopOnError, failFast, interpreter, sudo, maxBytes, cwd, env, envFromRemoteFiles, connectionName, timeoutMs }: z.infer<z.ZodObject<typeof executeCommandInputSchema>>, _extra?: unknown) {
       const sshManager = SSHConnectionManager.getInstance();
+      const internalConnectionTimeoutMs = _extra && typeof _extra === 'object' && Number.isSafeInteger((_extra as {connectionTimeoutMs?: unknown}).connectionTimeoutMs)
+        ? (_extra as {connectionTimeoutMs: number}).connectionTimeoutMs
+        : undefined;
       try {
         if ([command, script, steps, action].filter(value => value !== undefined).length !== 1) {
           throw new ToolError(
@@ -94,6 +97,7 @@ export async function executeCommand({ resourceKey, action, command, script, ste
             ...(resourceKey === undefined ? {} : {resourceKey}),
             ...(action === undefined ? {} : {action}),
             timeout: timeoutMs,
+            ...(internalConnectionTimeoutMs === undefined ? {} : {connectionTimeoutMs: internalConnectionTimeoutMs}),
             env,
             envFromRemoteFiles,
             script,

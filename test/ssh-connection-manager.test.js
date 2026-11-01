@@ -1749,7 +1749,7 @@ describe('SSH Connection Manager', () => {
       );
     });
 
-    it('SFTP open 卡住时会按 sftpTimeoutMs 失效连接', async () => {
+    it('SFTP open 卡住时只报告超时，不失效 SSH 连接', async () => {
       const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-mcp-test-'));
       const localFile = path.join(tempDir, 'upload.txt');
       fs.writeFileSync(localFile, 'data');
@@ -1782,11 +1782,11 @@ describe('SSH Connection Manager', () => {
         },
       );
 
-      assert.strictEqual(manager.getAllServerInfos()[0].connected, false);
-      assert.strictEqual(client.endCalls, 1);
+      assert.strictEqual(manager.getAllServerInfos()[0].connected, true);
+      assert.strictEqual(client.endCalls, 0);
     });
 
-    it('SFTP upload 传输超时时保留 OPERATION_TIMEOUT 错误码', async () => {
+    it('SFTP upload 传输超时时关闭 SFTP 通道并保留 SSH 连接', async () => {
       const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-mcp-test-'));
       const localFile = path.join(tempDir, 'upload.txt');
       fs.writeFileSync(localFile, 'data');
@@ -1825,8 +1825,8 @@ describe('SSH Connection Manager', () => {
         },
       );
 
-      assert.strictEqual(manager.getAllServerInfos()[0].connected, false);
-      assert.strictEqual(client.endCalls, 1);
+      assert.strictEqual(manager.getAllServerInfos()[0].connected, true);
+      assert.strictEqual(client.endCalls, 0);
     });
 
     it('exec 模式应用 commandTemplate 包裹命令', async () => {
@@ -2504,6 +2504,13 @@ describe('SSH Connection Manager', () => {
 
   describe('SFTP 并发传输', () => {
     const FAST_MIN_BYTES = 256 * 1024;
+
+    it('已知文件大小会把传输超时延长到带宽预算以上', () => {
+      const base = manager.getSftpTimeoutMs({ sftpTimeoutMs: 300000 });
+      const large = manager.getSftpTimeoutMs({ sftpTimeoutMs: 300000 }, undefined, 128 * 1024 * 1024);
+      assert.equal(base, 300000);
+      assert.ok(large > base);
+    });
 
     function setupTransfer(sftp) {
       const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-mcp-xfer-'));

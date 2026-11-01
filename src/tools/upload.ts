@@ -18,12 +18,13 @@ export function registerUploadTool(server: McpServer): void {
       inputSchema: {
         localPath: z.string().describe("Local path"),
         remotePath: z.string().describe("Remote path (POSIX absolute like /home/user/file.txt, or Windows drive-absolute like C:/Users/file.txt)"),
+        timeoutMs: z.number().int().positive().max(7 * 24 * 60 * 60 * 1000).optional().describe("SFTP operation timeout. Large files automatically extend the configured timeout by size; this value is the minimum."),
         connectionName,
       },
     },
-    async ({ localPath, remotePath, connectionName }) => {
+    async ({ localPath, remotePath, timeoutMs, connectionName }) => {
       try {
-        const result = await sshManager.upload(localPath, remotePath, connectionName);
+        const result = await sshManager.upload(localPath, remotePath, connectionName, timeoutMs);
         return {
           content: [{ type: "text", text: result }],
         };

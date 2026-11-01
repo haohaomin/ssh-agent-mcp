@@ -26,7 +26,7 @@ function setup(t) {
 }
 test('create exclusive, view lines, atomic edits and file permissions', async t => {
   const {root,files}=setup(t), p=path.join(root,'text'); await files.create(p,'one\ntwo\n');
-  await assert.rejects(files.create(p,'overwrite')); assert.equal(fs.readFileSync(p,'utf8'),'one\ntwo\n');
+  await assert.rejects(files.create(p,'overwrite'), error => error.code === 'REMOTE_FILE_EXISTS'); assert.equal(fs.readFileSync(p,'utf8'),'one\ntwo\n');
   assert.equal((await files.view(p,2,1)).content,'2\ttwo'); fs.chmodSync(p,0o640);
   await files.edit(p,[{oldText:'two',newText:'three'}]); assert.equal(fs.readFileSync(p,'utf8'),'one\nthree\n'); assert.equal(fs.statSync(p).mode & 0o777,0o640);
   assert.deepEqual(fs.readdirSync(root),['text']);
