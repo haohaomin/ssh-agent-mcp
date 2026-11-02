@@ -10,6 +10,7 @@ import { DurableSessions } from "../services/durable-sessions.js";
 import { RemoteFiles } from "../services/remote-files.js";
 import { cleanupExecLogs } from "../services/exec-log-retention.js";
 import { cleanupServiceLogs } from "../services/service-log-retention.js";
+import { createHash } from "node:crypto";
 
 const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -130,12 +131,15 @@ export class WebUi {
         maxAgeDays: z.number().min(0).max(36500).optional(),
         maxTotalBytes: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
         dryRun: z.boolean().default(true),
+        expectedPreview: sha.optional(),
       }));
-      return json(res, 200, await perform('web_session_log_cleanup', data, async () => {
-        if (data.scope === 'exec') return cleanupExecLogs(data);
-        if (data.scope === 'services') return cleanupServiceLogs(data);
-        return this.sessions.cleanup(data);
-      }));
+      const cleanup = async (dryRun: boolean) => data.scope === 'exec' ? cleanupExecLogs({...data, dryRun})
+        : data.scope === 'services' ? cleanupServiceLogs({...data, dryRun}) : this.sessions.cleanup({...data, dryRun});
+      const preview = await cleanup(true);
+      const previewId = createHash('sha256').update(JSON.stringify([data.scope, data.maxAgeDays, data.maxTotalBytes, preview.candidates, preview.reclaimableBytes])).digest('hex');
+      if (data.dryRun) return json(res, 200, {...preview, previewId});
+      if (data.expectedPreview !== previewId) throw new Error('清理候选项已变化或尚未预览，请重新预览后再删除');
+      return json(res, 200, await this.manager.activity!.log.run('web_session_log_cleanup', 'web', data, undefined, () => cleanup(false)));
     }
     if (suffix === "/api/servers" && req.method === "GET") return json(res, 200, {
       defaultConnectionName: this.manager.getDefaultConnectionName(),

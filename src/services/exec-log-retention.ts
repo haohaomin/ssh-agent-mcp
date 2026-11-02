@@ -6,7 +6,7 @@ export function cleanupExecLogs(options:{maxAgeDays?:number;maxTotalBytes?:numbe
   const directory=path.join(stateDirectory(),'exec-output'),dryRun=options.dryRun??true;
   const maxAgeDays=options.maxAgeDays??7,maxTotalBytes=options.maxTotalBytes??512*1024*1024;
   if(!Number.isFinite(maxAgeDays)||maxAgeDays<0||!Number.isSafeInteger(maxTotalBytes)||maxTotalBytes<0)throw new Error('Invalid log retention limits');
-  const result={dryRun,candidates:[] as string[],deleted:[] as string[],errors:[] as string[],retainedBytes:0};
+  const result={dryRun,candidates:[] as string[],deleted:[] as string[],errors:[] as string[],retainedBytes:0,reclaimableBytes:0,freedBytes:0};
   if(!fs.existsSync(directory))return result;
   if(!fs.lstatSync(directory).isDirectory())throw new Error('exec-output must be a real directory');
   const files=fs.readdirSync(directory).filter(n=>/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\.log$/.test(n)).flatMap(name=>{
@@ -16,9 +16,10 @@ export function cleanupExecLogs(options:{maxAgeDays?:number;maxTotalBytes?:numbe
   let bytes=protectedFile?.st.size??0;
   for(const {file,st} of files){
     if(file===options.protectPath)continue;
-    if(Date.now()-st.mtimeMs<=maxAgeDays*86400000 && bytes+st.size<=maxTotalBytes){bytes+=st.size;continue;}
+    if(maxAgeDays>0 && Date.now()-st.mtimeMs<=maxAgeDays*86400000 && bytes+st.size<=maxTotalBytes){bytes+=st.size;continue;}
     result.candidates.push(file);
-    if(!dryRun)try{const current=fs.lstatSync(file);if(current.isFile()&&current.ino===st.ino&&current.mtimeMs===st.mtimeMs){fs.unlinkSync(file);result.deleted.push(file);}}catch{result.errors.push(file);}
+    result.reclaimableBytes+=st.size;
+    if(!dryRun)try{const current=fs.lstatSync(file);if(current.isFile()&&current.dev===st.dev&&current.ino===st.ino&&current.mtimeMs===st.mtimeMs&&current.size===st.size){fs.unlinkSync(file);result.deleted.push(file);result.freedBytes+=st.size;}else{result.errors.push(file);bytes+=current.size;}}catch{result.errors.push(file);bytes+=st.size;}
   }
   result.retainedBytes=bytes;return result;
 }

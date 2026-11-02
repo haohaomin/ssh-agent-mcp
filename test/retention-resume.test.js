@@ -14,8 +14,8 @@ test('exec retention previews then deletes only expired/over-budget regular UUID
  const old=path.join(dir,randomUUID()+'.log'),recent=path.join(dir,randomUUID()+'.log'),newest=path.join(dir,randomUUID()+'.log');
  for(const f of [old,recent,newest])fs.writeFileSync(f,'1234567890');fs.utimesSync(old,0,0);fs.utimesSync(recent,new Date(Date.now()-1000),new Date(Date.now()-1000));
  const outside=path.join(root,'outside');fs.writeFileSync(outside,'protected');const link=path.join(dir,randomUUID()+'.log');fs.symlinkSync(outside,link);fs.writeFileSync(path.join(dir,'user.log'),'protected');
- const preview=cleanupExecLogs({maxAgeDays:7,maxTotalBytes:10});assert.equal(preview.candidates.length,2);assert(fs.existsSync(old));
- const done=cleanupExecLogs({maxAgeDays:7,maxTotalBytes:10,dryRun:false});assert.equal(done.deleted.length,2);assert(fs.existsSync(newest));assert(fs.lstatSync(link).isSymbolicLink());assert.equal(fs.readFileSync(outside,'utf8'),'protected');
+ const preview=cleanupExecLogs({maxAgeDays:7,maxTotalBytes:10});assert.equal(preview.candidates.length,2);assert.equal(preview.reclaimableBytes,20);assert.equal(preview.freedBytes,0);assert(fs.existsSync(old));
+ const done=cleanupExecLogs({maxAgeDays:7,maxTotalBytes:10,dryRun:false});assert.equal(done.deleted.length,2);assert.equal(done.freedBytes,20);assert(fs.existsSync(newest));assert(fs.lstatSync(link).isSymbolicLink());assert.equal(fs.readFileSync(outside,'utf8'),'protected');
  assert.equal(cleanupExecLogs({maxAgeDays:0,maxTotalBytes:0,dryRun:false,protectPath:newest}).deleted.length,0);
  fs.rmSync(dir,{recursive:true});fs.symlinkSync(root,dir);assert.throws(()=>cleanupExecLogs(),/real directory/);
 });

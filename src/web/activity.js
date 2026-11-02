@@ -7,7 +7,7 @@ const titles = {
   ssh_session_write: '发送终端命令', web_session_write: '发送终端命令', session_output: '终端实时输出',
   ssh_session_stop: '停止终端', web_session_stop: '停止终端', ssh_session_read: '读取终端',
   ssh_session_list: '查看终端列表', ssh_session_log: '读取终端日志', ssh_session_resize: '调整终端尺寸', web_session_resize: '调整终端尺寸',
-  ssh_session_log_cleanup: '清理终端日志', web_session_log_cleanup: '清理终端日志', ssh_forward_list: '查看转发列表',
+  ssh_session_log_cleanup: '清理终端日志', web_session_log_cleanup: '清理本机日志', ssh_forward_list: '查看转发列表',
   ssh_forward_start: '创建本地转发', ssh_forward_reverse: '创建反向转发', ssh_forward_stop: '停止转发', web_forward_stop: '停止转发',
   ssh_server_diagnose: '连接诊断', web_diagnose: '连接诊断', ssh_config_reload: '重新读取配置', web_config_reload: '重新读取配置',
   ssh_server_list: '查看服务器', ssh_directory_list: '浏览目录', ssh_file_grep: '搜索文件内容', ssh_file_glob: '查找文件',
@@ -30,7 +30,7 @@ export function activityInfo(record) {
   const input = record.operation === 'ssh_server_list' ? {} : parse(record.input) || {};
   const servers = serverResult(record);
   const title = titles[record.operation] || '执行操作';
-  const scope = globalOperations.has(record.operation) ? '所有服务器' : record.connectionName || '全局';
+  const scope = record.operation === 'web_session_log_cleanup' ? '本机日志' : globalOperations.has(record.operation) ? '所有服务器' : record.connectionName || '全局';
   const duration = Math.max(0, new Date(record.finishedAt || record.updatedAt) - new Date(record.startedAt));
   let summary = input.command || input.remotePath || input.localPath || input.input || input.sessionName || input.jobId;
   if (!summary && servers) summary = `${servers.length} 台服务器 · ${servers.filter(s => s.connected).length} 台已连接`;

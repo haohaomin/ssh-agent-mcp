@@ -93,9 +93,14 @@ for (const backend of ['ssh2', 'openssh']) test(`Workbench HTTP workflows agains
       fs.writeFileSync(log, 'stale service output');
       fs.writeFileSync(registry, JSON.stringify({ pid: 2147483647 }));
       const old = Date.now() / 1000 - 86400 * 2; fs.utimesSync(log, old, old); fs.utimesSync(registry, old, old);
-      const preview = await call('/logs/cleanup', { scope: 'services', maxAgeDays: 0, dryRun: true });
+      let preview = await call('/logs/cleanup', { scope: 'services', maxAgeDays: 0, dryRun: true });
       assert.equal(preview.dryRun, true); assert.deepEqual(preview.candidates, [log]); assert.equal(fs.existsSync(log), true);
-      const removed = await call('/logs/cleanup', { scope: 'services', maxAgeDays: 0, dryRun: false });
+      await call('/logs/cleanup', { scope: 'services', maxAgeDays: 0, dryRun: false }, 400);
+      fs.appendFileSync(log, 'new data');
+      await call('/logs/cleanup', { scope: 'services', maxAgeDays: 0, dryRun: false, expectedPreview: preview.previewId }, 400);
+      assert.equal(fs.existsSync(log), true);
+      preview = await call('/logs/cleanup', { scope: 'services', maxAgeDays: 0, dryRun: true });
+      const removed = await call('/logs/cleanup', { scope: 'services', maxAgeDays: 0, dryRun: false, expectedPreview: preview.previewId });
       assert.deepEqual(removed.deleted, [log]); assert.equal(fs.existsSync(log), false); assert.equal(fs.existsSync(registry), true);
     });
     await t.test('durable terminal start, GET output, write, resize, method guard and stop', async () => {
