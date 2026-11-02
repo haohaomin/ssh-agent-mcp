@@ -7,7 +7,7 @@ const titles = {
   ssh_session_write: '发送终端命令', web_session_write: '发送终端命令', session_output: '终端实时输出',
   ssh_session_stop: '停止终端', web_session_stop: '停止终端', ssh_session_read: '读取终端',
   ssh_session_list: '查看终端列表', ssh_session_log: '读取终端日志', ssh_session_resize: '调整终端尺寸', web_session_resize: '调整终端尺寸',
-  ssh_session_log_cleanup: '清理终端日志', ssh_forward_list: '查看转发列表',
+  ssh_session_log_cleanup: '清理终端日志', web_session_log_cleanup: '清理终端日志', ssh_forward_list: '查看转发列表',
   ssh_forward_start: '创建本地转发', ssh_forward_reverse: '创建反向转发', ssh_forward_stop: '停止转发', web_forward_stop: '停止转发',
   ssh_server_diagnose: '连接诊断', web_diagnose: '连接诊断', ssh_config_reload: '重新读取配置', web_config_reload: '重新读取配置',
   ssh_server_list: '查看服务器', ssh_directory_list: '浏览目录', ssh_file_grep: '搜索文件内容', ssh_file_glob: '查找文件',
@@ -15,7 +15,7 @@ const titles = {
 };
 const statuses = { running: '进行中', succeeded: '已完成', failed: '失败', interrupted: '跟踪中断' };
 const sources = { mcp: 'AI / MCP', web: '网页操作', monitor: '自动跟踪' };
-const globalOperations = new Set(['ssh_server_list', 'ssh_config_reload', 'web_config_reload', 'ssh_session_list', 'ssh_session_log_cleanup', 'ssh_forward_list']);
+const globalOperations = new Set(['ssh_server_list', 'ssh_config_reload', 'web_config_reload', 'ssh_session_list', 'ssh_session_log_cleanup', 'web_session_log_cleanup', 'ssh_forward_list']);
 const changes = new Set(['ssh_file_edit','web_file_edit','ssh_file_write','web_file_create','ssh_upload','ssh_sync']);
 const $ = selector => document.querySelector(selector);
 const parse = text => { try { return JSON.parse(text); } catch { return undefined; } };

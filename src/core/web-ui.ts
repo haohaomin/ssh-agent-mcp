@@ -8,6 +8,8 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { SSHConnectionManager } from "../services/ssh-connection-manager.js";
 import { DurableSessions } from "../services/durable-sessions.js";
 import { RemoteFiles } from "../services/remote-files.js";
+import { cleanupExecLogs } from "../services/exec-log-retention.js";
+import { cleanupServiceLogs } from "../services/service-log-retention.js";
 
 const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -122,6 +124,19 @@ export class WebUi {
     const name = url.searchParams.get("connectionName") || undefined;
     const string = z.string().min(1);
     const sha = z.string().regex(/^[a-fA-F0-9]{64}$/);
+    if (suffix === "/api/logs/cleanup" && req.method === "POST") {
+      const data = await readBody(z.object({
+        scope: z.enum(['sessions', 'exec', 'services']).default('sessions'),
+        maxAgeDays: z.number().min(0).max(36500).optional(),
+        maxTotalBytes: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
+        dryRun: z.boolean().default(true),
+      }));
+      return json(res, 200, await perform('web_session_log_cleanup', data, async () => {
+        if (data.scope === 'exec') return cleanupExecLogs(data);
+        if (data.scope === 'services') return cleanupServiceLogs(data);
+        return this.sessions.cleanup(data);
+      }));
+    }
     if (suffix === "/api/servers" && req.method === "GET") return json(res, 200, {
       defaultConnectionName: this.manager.getDefaultConnectionName(),
       servers: this.manager.getAllServerInfos().map(server => {

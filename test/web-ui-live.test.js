@@ -86,6 +86,18 @@ for (const backend of ['ssh2', 'openssh']) test(`Workbench HTTP workflows agains
       fs.writeFileSync(path.join(fixture.root, 'invalid-utf8'), Buffer.from([255, 254]));
       await call(`/file?path=${encodeURIComponent(path.join(fixture.root, 'invalid-utf8'))}`, undefined, 400);
     });
+    await t.test('web log maintenance previews before deleting selected service logs', async () => {
+      const directory = path.join(fixture.root, 'state', 'services'), key = '0123456789abcdef0123456789abcdef';
+      fs.mkdirSync(directory, { recursive: true });
+      const log = path.join(directory, `${key}.log`), registry = path.join(directory, `${key}.json`);
+      fs.writeFileSync(log, 'stale service output');
+      fs.writeFileSync(registry, JSON.stringify({ pid: 2147483647 }));
+      const old = Date.now() / 1000 - 86400 * 2; fs.utimesSync(log, old, old); fs.utimesSync(registry, old, old);
+      const preview = await call('/logs/cleanup', { scope: 'services', maxAgeDays: 0, dryRun: true });
+      assert.equal(preview.dryRun, true); assert.deepEqual(preview.candidates, [log]); assert.equal(fs.existsSync(log), true);
+      const removed = await call('/logs/cleanup', { scope: 'services', maxAgeDays: 0, dryRun: false });
+      assert.deepEqual(removed.deleted, [log]); assert.equal(fs.existsSync(log), false); assert.equal(fs.existsSync(registry), true);
+    });
     await t.test('durable terminal start, GET output, write, resize, method guard and stop', async () => {
       await call('/sessions/start', { sessionName }); assert.equal((await call('/sessions'))[0].connectionName, 'fixture');
       await call(`/sessions/${sessionName}/write`, { input: "printf 'UI_%s\\n' '终端成功'\n" });

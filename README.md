@@ -150,6 +150,7 @@ node build/index.js --config-file servers.json
 - **终端独立存活**：MCP 重启不会结束终端；使用 `ssh_session_stop` 关闭。`autoClose: true` 会在远端 shell 退出后回收 worker 和 tmux 观察窗口。机器重启或 SSH 断线不能恢复原 shell。
 - **日志本地保存**：默认 `~/.local/state/ssh-agent-mcp`，文件权限 `0600`；完整终端输出可能包含敏感内容，需按需清理。可用 `SSH_AGENT_STATE_DIR` 修改位置。
 - **日志清理先预览**：`ssh_session_log_cleanup` 默认 `dryRun: true`，支持 `sessions`、`exec`、`services` 三种范围。检查候选项后再传 `dryRun: false` 删除日志；exec 输出自动按 7 天/512 MiB 保留，shared service 启动日志自动按 30 天/64 MiB 保留，活动 worker 和当前服务日志会跳过。
+- **网页端可清理日志**：SSH Workbench 的“操作记录 → 日志与缓存”提供同样的三种范围；先点击“预览删除”，确认候选项后再点击“删除候选项”。删除操作会写入操作记录，并沿用活动日志、锁文件和未知归属保护。
 - **配置热加载**：`ssh_config_reload` 无需参数，重读启动时的 JSON/OpenSSH 配置并保留命令行覆盖。未变化的 ssh2 连接保持开启，变化/移除的连接和原生 OpenSSH 连接断开后按需重连。修改配置前先停止对应持久终端。
 - **连接诊断**：`ssh_server_diagnose` 检查 SSH 连接与 SFTP，并报告本机 ssh/rsync、known_hosts 和原生配置文件状态；不返回密码或密钥内容。
 - **配置命令在连接时运行**：导入不执行 `Match exec` / `ProxyCommand`，原生连接时由 OpenSSH 执行。

@@ -14,6 +14,7 @@ if (launchToken) {
 }
 let pollBusy = false, authenticationNeeded = false;
 let commandContext = null, draftRevision = 0;
+let retentionPreview = null;
 const request = async (path, options = {}) => {
   const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
   if (bearer) headers.Authorization = `Bearer ${bearer}`;
@@ -82,6 +83,42 @@ async function refreshView() {
   if (state.view === 'files') await loadFiles(state.directory);
   if (state.view === 'tasks') await loadTasks();
   if (state.view === 'forwards') await loadForwards();
+}
+const retentionNames = { sessions: '已停止终端', exec: '命令输出', services: '服务日志' };
+function formatBytes(value) {
+  const bytes = Number(value) || 0;
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ['KiB', 'MiB', 'GiB']; let amount = bytes;
+  for (const unit of units) { amount /= 1024; if (amount < 1024 || unit === units.at(-1)) return `${amount.toFixed(amount >= 10 ? 0 : 1)} ${unit}`; }
+  return `${bytes} B`;
+}
+function renderRetention(result, scope, executed = false) {
+  retentionPreview = executed ? null : { scope, result };
+  const candidates = Array.isArray(result?.candidates) ? result.candidates : [];
+  const deleted = Array.isArray(result?.deleted) ? result.deleted : [];
+  const amount = result?.freedBytes ?? result?.reclaimableBytes ?? 0;
+  const label = retentionNames[scope] || scope;
+  $('#retention-summary').textContent = executed
+    ? `已删除 ${deleted.length} 项 ${label}，释放 ${formatBytes(result?.freedBytes)}。${result?.skipped?.length ? ` 跳过 ${result.skipped.length} 项。` : ''}`
+    : `发现 ${candidates.length} 项 ${label}候选，可释放约 ${formatBytes(amount)}。${result?.skipped?.length ? ` 已保护/跳过 ${result.skipped.length} 项。` : ''}`;
+  const details = [...candidates, ...deleted].slice(0, 100).map(item => typeof item === 'string' ? item : `${item.sessionName || item.file || item.path || item}`);
+  $('#retention-details').textContent = details.join('\n');
+  $('#retention-details').hidden = details.length === 0;
+  $('#retention-delete').disabled = executed || candidates.length === 0;
+}
+async function previewRetention() {
+  const scope = $('#retention-scope').value;
+  const result = await post('/logs/cleanup', { scope, dryRun: true });
+  renderRetention(result, scope);
+}
+async function deleteRetention() {
+  const scope = $('#retention-scope').value;
+  if (!retentionPreview || retentionPreview.scope !== scope || !retentionPreview.result?.candidates?.length) { await previewRetention(); return; }
+  if (!window.confirm(`确定删除 ${retentionPreview.result.candidates.length} 项${retentionNames[scope]}吗？此操作不可撤销。`)) return;
+  const result = await post('/logs/cleanup', { scope, dryRun: false });
+  renderRetention(result, scope, true);
+  say(`已清理${retentionNames[scope]}日志，释放 ${formatBytes(result.freedBytes)}。`);
+  await previewRetention();
 }
 // Keep button nodes stable while polling so keyboard focus and pointer presses survive.
 function reconcileButtons(container, items, keyOf, create, update) {
@@ -335,6 +372,15 @@ $('#preview-file').addEventListener('click', guarded(previewFile));
 $('#back-edit').addEventListener('click', () => { $('#file-preview').hidden = true; });
 $('#apply-file').addEventListener('click', guarded(applyFile)); $('#restore-file').addEventListener('click', guarded(restoreFile));
 $('#refresh-tasks').addEventListener('click', guarded(loadTasks)); $('#refresh-forwards').addEventListener('click', guarded(loadForwards));
+$('#retention-preview').addEventListener('click', guarded(previewRetention));
+$('#retention-refresh').addEventListener('click', guarded(previewRetention));
+$('#retention-delete').addEventListener('click', guarded(deleteRetention));
+$('#retention-scope').addEventListener('change', () => {
+  retentionPreview = null;
+  $('#retention-summary').textContent = '尚未检查';
+  $('#retention-details').hidden = true;
+  $('#retention-delete').disabled = true;
+});
 $('#takeover').addEventListener('click', () => setInput(!state.owned));
 $('#command').addEventListener('keydown', async event => {
   if (event.key !== 'Enter' || !state.session || !state.owned || event.isComposing) return;

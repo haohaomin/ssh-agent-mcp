@@ -53,6 +53,12 @@
         <button data-activity-metric="changes" aria-pressed="false"><span>文件修改</span><strong id="metric-changes">0</strong></button>
         <button data-activity-metric="failed" aria-pressed="false"><span>需要关注</span><strong id="metric-failed">0</strong></button>
       </div>
+      <section class="retention-panel" aria-labelledby="retention-title">
+        <div class="retention-head"><div><h2 id="retention-title">日志与缓存</h2><p class="muted">先预览候选项，再确认删除。活动日志和正在使用的日志不会被删除。</p></div><button id="retention-refresh" class="outline">检查</button></div>
+        <div class="retention-controls"><label>范围 <select id="retention-scope" aria-label="日志清理范围"><option value="services">服务日志 · 30 天 / 64 MiB</option><option value="exec">命令输出 · 7 天 / 512 MiB</option><option value="sessions">已停止终端 · 30 天</option></select></label><button id="retention-preview" class="outline">预览删除</button><button id="retention-delete" class="primary" disabled>删除候选项</button></div>
+        <p id="retention-summary" class="muted" role="status">尚未检查</p>
+        <pre id="retention-details" class="retention-details" hidden></pre>
+      </section>
       <div class="activity-toolbar">
         <label class="activity-search-wrap"><span aria-hidden="true">⌕</span><input id="activity-search" type="search" aria-label="搜索操作" placeholder="搜索命令、文件或结果…"><kbd>/</kbd></label>
         <select id="activity-host" aria-label="筛选服务器"><option value="">全部服务器</option></select>

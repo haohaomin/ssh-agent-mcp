@@ -68,6 +68,16 @@ h1 { font-size:26px; font-weight:600; letter-spacing:-.8px; }
 .activity-stats strong { font-size:26px; font-weight:500; line-height:1.25; display:block; margin-top:8px; font-variant-numeric:tabular-nums; letter-spacing:-.6px; }
 .activity-stats button[aria-pressed=true] strong { color:var(--blue); }
 .activity-stats button:hover { background:#f8faff; }
+.retention-panel { margin:0 0 22px; padding:18px 20px; border:1px solid var(--line); border-radius:10px; background:#fff; }
+.retention-head,.retention-controls { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+.retention-head { margin-bottom:14px; }
+.retention-head h2 { margin-bottom:4px; }
+.retention-controls { justify-content:flex-start; }
+.retention-controls label { display:flex; align-items:center; gap:8px; color:var(--muted); font-size:11px; }
+.retention-controls select { min-width:230px; border:1px solid var(--line); border-radius:7px; background:#fff; color:#525b69; padding:8px 10px; font-size:11px; }
+.retention-details { margin:12px 0 0; max-height:150px; overflow:auto; padding:10px 12px; border:1px solid #e9edf2; border-radius:7px; background:#fafbfc; color:#596475; font:11px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace; white-space:pre-wrap; overflow-wrap:anywhere; }
+.retention-panel #retention-delete { background:var(--red); border-color:var(--red); }
+.retention-panel #retention-delete:hover { background:#8f3731; }
 .activity-toolbar { display:flex; align-items:center; gap:8px; }
 .activity-search-wrap { display:flex; flex:1; min-width:150px; gap:9px; align-items:center; height:38px; padding:0 11px; background:#fff; border:1px solid var(--line); border-radius:7px; }
 .activity-search-wrap>span { font-size:22px; color:#89909b; line-height:1; }
