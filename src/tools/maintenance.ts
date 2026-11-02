@@ -77,7 +77,7 @@ export function registerMaintenanceTools(server: McpServer): void {
     description: "Preview/remove logs: scope=sessions handles stopped durable sessions, scope=exec handles UUID exec-output logs, and scope=services handles stopped shared-service startup logs. Exec logs are automatically retained for 7 days/512 MiB; service logs are automatically retained for 30 days/64 MiB. Dry-run is enabled by default; active workers and the current service log are skipped.",
     inputSchema: {
       scope: z.enum(['sessions','exec','services']).default('sessions').describe('sessions preserves existing cleanup; exec handles command output; services handles shared-service startup logs'),
-      maxAgeDays: z.number().min(0).max(36500).default(30),
+      maxAgeDays: z.number().min(0).max(36500).optional().describe("Retention age: exec defaults to 7 days; sessions and services default to 30 days"),
       maxTotalBytes: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
       dryRun: z.boolean().default(true),
     },

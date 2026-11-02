@@ -1745,7 +1745,7 @@ Preview/remove logs: scope=sessions handles stopped durable sessions, scope=exec
       ]
     },
     "maxAgeDays": {
-      "default": 30,
+      "description": "Retention age: exec defaults to 7 days; sessions and services default to 30 days",
       "type": "number",
       "minimum": 0,
       "maximum": 36500

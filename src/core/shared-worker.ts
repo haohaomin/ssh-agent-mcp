@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import { SshMcpServer } from './mcp-server.js';
 import { CommandLineParser } from '../cli/command-line-parser.js';
 import { readService } from './shared-service.js';
+import { cleanupServiceLogs } from '../services/service-log-retention.js';
 
 // Configuration travels over a private inherited IPC channel, not daemon argv.
 process.once('message', async (message: {args:string[];id:string;key:string;scopeKey:string;token:string;filename:string}) => {
@@ -16,6 +17,10 @@ process.once('message', async (message: {args:string[];id:string;key:string;scop
       const service={id,key,scopeKey,pid:process.pid,endpoint,ui,token};
       const temp=filename+'.'+id+'.tmp';
       fs.writeFileSync(temp,JSON.stringify(service),{mode:0o600,flag:'wx'}); fs.renameSync(temp,filename);
+      const logPath=filename.replace(/\.json$/, '.log');
+      try { cleanupServiceLogs({dryRun:false,protectPaths:[logPath]}); } catch {}
+      const retentionTimer=setInterval(() => { try { cleanupServiceLogs({dryRun:false,protectPaths:[logPath]}); } catch {} }, 6 * 60 * 60 * 1000);
+      retentionTimer.unref();
       process.send?.({ready:service});
     }});
   } catch(error) {

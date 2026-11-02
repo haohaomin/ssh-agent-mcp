@@ -85,3 +85,17 @@ test('cleanup respects age and size together, skips live workers, locks and untr
   const removed=await sessions.cleanup({maxAgeDays:30,maxTotalBytes:30,dryRun:false});assert.deepEqual(removed.deleted,['old','recent']);assert.equal(removed.freedBytes,120);
   assert.ok(fs.existsSync(live.log));assert.ok(fs.existsSync(locked.log));assert.ok(fs.existsSync(external));assert.ok(fs.existsSync(sessionPaths('newest').log));
 });
+
+test('cleanup tool uses scope-specific age defaults', async t => {
+  const {z}=await import('zod');
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'retention-defaults-')),prev=process.env.SSH_AGENT_STATE_DIR;process.env.SSH_AGENT_STATE_DIR=root;
+  t.after(()=>{if(prev===undefined)delete process.env.SSH_AGENT_STATE_DIR;else process.env.SSH_AGENT_STATE_DIR=prev;fs.rmSync(root,{recursive:true,force:true});});
+  const execDir=path.join(root,'exec-output'),serviceDir=path.join(root,'services');fs.mkdirSync(execDir);fs.mkdirSync(serviceDir);
+  const execFile=path.join(execDir,'00000000-0000-4000-8000-000000000000.log'),serviceFile=path.join(serviceDir,'a'.repeat(32)+'.log');
+  for(const file of [execFile,serviceFile]){fs.writeFileSync(file,'old');const at=new Date(Date.now()-10*86400000);fs.utimesSync(file,at,at);}
+  let tool;registerMaintenanceTools({registerTool(name,meta,handler){if(name==='ssh_session_log_cleanup')tool={meta,handler};}});
+  const invoke=async args=>JSON.parse((await tool.handler(z.object(tool.meta.inputSchema).parse(args))).content[0].text);
+  const exec=await invoke({scope:'exec'});assert.equal(exec.dryRun,true);assert.deepEqual(exec.candidates,[execFile]);
+  const services=await invoke({scope:'services'});assert.deepEqual(services.candidates,[]);
+  assert.deepEqual((await invoke({scope:'services',maxAgeDays:0})).candidates,[serviceFile]);assert.ok(fs.existsSync(serviceFile));
+});

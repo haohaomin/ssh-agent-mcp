@@ -44,3 +44,23 @@ for(const backend of ['ssh2','openssh'])test(`verified resume and retained parti
  let failure;try{await transferRemoteFile(m,{...args,transferId:undefined,resumable:true,timeoutMs:1});}catch(e){failure=e;}
  assert(failure);assert(failure.transferId);assert.equal(failure.resumable,true);assert(fs.readFileSync(target).equals(data));
 });
+test('service retention reserves active bytes first and protects locks, unknown owners and symlinks',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'service-protection-')),prev=process.env.SSH_AGENT_STATE_DIR;process.env.SSH_AGENT_STATE_DIR=root;
+ t.after(()=>{if(prev===undefined)delete process.env.SSH_AGENT_STATE_DIR;else process.env.SSH_AGENT_STATE_DIR=prev;fs.rmSync(root,{recursive:true,force:true});});
+ const dir=path.join(root,'services');fs.mkdirSync(dir);
+ const make=(digit,age=0)=>{const key=digit.repeat(32),file=path.join(dir,key+'.log');fs.writeFileSync(file,'0123456789');const at=new Date(Date.now()-age*86400000);fs.utimesSync(file,at,at);return {key,file};};
+ const active=make('a',60),recent=make('b'),locked=make('c',60),corrupt=make('d',60),unknown=make('e',60),dead=make('f',60);
+ fs.writeFileSync(path.join(dir,active.key+'.json'),JSON.stringify({pid:process.pid}));
+ fs.writeFileSync(path.join(dir,locked.key+'.lock'),'');
+ fs.writeFileSync(path.join(dir,corrupt.key+'.json'),'{broken');
+ fs.writeFileSync(path.join(dir,unknown.key+'.json'),JSON.stringify({pid:0}));
+ fs.writeFileSync(path.join(dir,dead.key+'.json'),JSON.stringify({pid:2147483647}));
+ const outside=path.join(root,'outside');fs.writeFileSync(outside,'untouched');const link=path.join(dir,'0'.repeat(32)+'.log');fs.symlinkSync(outside,link);
+ fs.writeFileSync(path.join(dir,'user.log'),'untouched');
+ const preview=cleanupServiceLogs({maxTotalBytes:40});assert.deepEqual(new Set(preview.candidates),new Set([recent.file,dead.file]));assert.equal(preview.reclaimableBytes,20);assert.equal(preview.freedBytes,0);
+ const done=cleanupServiceLogs({maxTotalBytes:40,dryRun:false});assert.equal(done.freedBytes,20);assert.equal(done.retainedBytes,40);
+ for(const item of [active,locked,corrupt,unknown])assert.ok(fs.existsSync(item.file));
+ assert.equal(fs.readFileSync(outside,'utf8'),'untouched');assert.ok(fs.lstatSync(link).isSymbolicLink());assert.ok(fs.existsSync(path.join(dir,'user.log')));
+ assert.ok(!fs.existsSync(path.join(dir,dead.key+'.lock')));assert.ok(fs.existsSync(path.join(dir,dead.key+'.json')));
+ fs.rmSync(dir,{recursive:true});fs.symlinkSync(root,dir);assert.throws(()=>cleanupServiceLogs(),/real directory/);
+});

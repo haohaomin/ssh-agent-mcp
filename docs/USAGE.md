@@ -412,7 +412,7 @@ MCP 进程重启后可以复用同一 worker、shell 和环境。`ensure` 不重
 
 调用 `ssh_session_log_cleanup` 查看候选路径，再用 `dryRun: false` 删除。只处理 exec-output 目录内 UUID 命名的普通日志，跳过符号链接及其他文件；不删除终端、任务、活动历史或续传文件。省略 scope 保持原来的 sessions 清理。自动清理在写入完整日志后触发，清理失败不会覆盖已经完成的命令结果；手动清理可查看错误。
 
-shared service 启动日志位于状态目录的 `services/` 下。每次启动新服务时会自动清理超过 30 天或超过 64 MiB 配额的已停止服务日志；当前服务和仍存活的服务进程会跳过。需要立即检查时传 `scope: "services", dryRun: true`，确认后再执行删除。
+shared service 启动日志位于状态目录的 `services/` 下。每次启动新服务及 shared worker 每运行 6 小时，会自动清理超过 30 天或超过 64 MiB 配额的已停止服务日志；当前服务、仍存活或正在启动的服务，以及无法确认归属的日志会跳过。活动日志不截断，因此 64 MiB 不是整个目录的硬上限。需要立即检查时传 `scope: "services", dryRun: true`，确认后再执行删除。
 
 ## 多机聚合执行
 

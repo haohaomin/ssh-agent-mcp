@@ -13,9 +13,20 @@ type Options = {
   protectPaths?: string[];
 };
 
-function livePid(pid: unknown): boolean {
-  if (!Number.isSafeInteger(pid) || (pid as number) <= 0) return false;
-  try { process.kill(pid as number, 0); return true; } catch { return false; }
+// Unknown/corrupt ownership is protected, including EPERM from kill(pid, 0).
+function registryProtects(file: string): boolean {
+  try {
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.size > 65536) return true;
+    const record = JSON.parse(fs.readFileSync(file, 'utf8')) as {pid?: unknown};
+    if (!Number.isSafeInteger(record.pid) || (record.pid as number) <= 0) return true;
+    try { process.kill(record.pid as number, 0); return true; }
+    catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
+  } catch (error) { return (error as NodeJS.ErrnoException).code !== 'ENOENT'; }
+}
+function present(file: string): boolean {
+  try { fs.lstatSync(file); return true; }
+  catch (error) { return (error as NodeJS.ErrnoException).code !== 'ENOENT'; }
 }
 
 /**
@@ -38,6 +49,8 @@ export function cleanupServiceLogs(options: Options = {}) {
     skipped: [] as string[],
     errors: [] as string[],
     retainedBytes: 0,
+    reclaimableBytes: 0,
+    freedBytes: 0,
   };
   if (!fs.existsSync(directory)) return result;
   if (!fs.lstatSync(directory).isDirectory()) throw new Error('services must be a real directory');
@@ -50,36 +63,50 @@ export function cleanupServiceLogs(options: Options = {}) {
         const stat = fs.lstatSync(file);
         if (!stat.isFile()) return [];
         const key = name.slice(0, -4);
-        let active = false;
         const registry = path.join(directory, `${key}.json`);
-        try {
-          const record = JSON.parse(fs.readFileSync(registry, 'utf8')) as {pid?: unknown};
-          active = livePid(record.pid);
-        } catch {}
-        return [{file, stat, active}];
+        const lock = path.join(directory, `${key}.lock`);
+        const protectedLog = protectedPaths.has(path.resolve(file)) || present(lock) || registryProtects(registry);
+        return [{file, stat, registry, lock, protectedLog}];
       } catch { return []; }
     })
     .sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
-  let retained = 0;
+  // Reserve protected bytes first, independent of file age/sort order. They
+  // may exceed the budget; retention never truncates an active writer's log.
+  let retained = files.filter(item => item.protectedLog).reduce((sum, item) => sum + item.stat.size, 0);
+  const now = Date.now();
   for (const item of files) {
-    if (item.active || protectedPaths.has(path.resolve(item.file))) {
+    if (item.protectedLog) {
       result.skipped.push(item.file);
-      retained += item.stat.size;
       continue;
     }
-    if (Date.now() - item.stat.mtimeMs <= maxAgeDays * 86400000 && retained + item.stat.size <= maxTotalBytes) {
+    if (maxAgeDays > 0 && now - item.stat.mtimeMs <= maxAgeDays * 86400000 && retained + item.stat.size <= maxTotalBytes) {
       retained += item.stat.size;
       continue;
     }
     result.candidates.push(item.file);
+    result.reclaimableBytes += item.stat.size;
     if (!dryRun) {
+      let lock: number;
+      try { lock = fs.openSync(item.lock, 'wx', 0o600); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EEXIST') result.skipped.push(item.file);
+        else result.errors.push(item.file);
+        retained += item.stat.size;
+        continue;
+      }
       try {
+        fs.writeSync(lock, JSON.stringify({pid: process.pid}));
+        // Share the startup lock with ensureService. A service cannot start
+        // writing this log between the final ownership check and unlink.
         const current = fs.lstatSync(item.file);
-        if (current.isFile() && current.ino === item.stat.ino && current.mtimeMs === item.stat.mtimeMs) {
+        if (!registryProtects(item.registry) && current.isFile() && current.dev === item.stat.dev &&
+            current.ino === item.stat.ino && current.mtimeMs === item.stat.mtimeMs && current.size === item.stat.size) {
           fs.unlinkSync(item.file);
           result.deleted.push(item.file);
-        } else result.skipped.push(item.file);
-      } catch { result.errors.push(item.file); }
+          result.freedBytes += item.stat.size;
+        } else { result.skipped.push(item.file); retained += current.size; }
+      } catch { result.errors.push(item.file); retained += item.stat.size; }
+      finally { fs.closeSync(lock); fs.unlinkSync(item.lock); }
     }
   }
   result.retainedBytes = retained;
