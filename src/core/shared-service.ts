@@ -9,6 +9,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { CommandLineParser } from '../cli/command-line-parser.js';
 import { stateDirectory } from '../services/durable-sessions.js';
 import { Logger } from '../utils/logger.js';
+import { cleanupServiceLogs } from '../services/service-log-retention.js';
 
 export interface SharedService {
   id: string; key: string; scopeKey?: string; pid: number; endpoint: string; ui: string; token: string;
@@ -108,6 +109,7 @@ export async function ensureService(args: string[]): Promise<SharedService> {
         }
         const id = randomBytes(24).toString('hex'), token = parsed.http.token || randomBytes(32).toString('hex');
         const logPath = path.join(dir,key+'.log');
+        try { cleanupServiceLogs({ dryRun: false, protectPaths: [logPath] }); } catch { /* Retention must not block service startup. */ }
         // Keep startup logs bounded between launches.
         const log = fs.openSync(logPath,'w',0o600);
         const child = fork(worker, [], { detached:true, stdio:['ignore','ignore',log,'ipc'], execArgv:[] });

@@ -1,5 +1,6 @@
 import {test} from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {randomUUID,randomBytes} from 'node:crypto';
 import {cleanupExecLogs} from '../build/services/exec-log-retention.js';
+import {cleanupServiceLogs} from '../build/services/service-log-retention.js';
 import {withResourceLock} from '../build/utils/resource-lock.js';
 import {SSHConnectionManager} from '../build/services/ssh-connection-manager.js';
 import {transferRemoteFile} from '../build/services/remote-transfer.js';
@@ -17,6 +18,15 @@ test('exec retention previews then deletes only expired/over-budget regular UUID
  const done=cleanupExecLogs({maxAgeDays:7,maxTotalBytes:10,dryRun:false});assert.equal(done.deleted.length,2);assert(fs.existsSync(newest));assert(fs.lstatSync(link).isSymbolicLink());assert.equal(fs.readFileSync(outside,'utf8'),'protected');
  assert.equal(cleanupExecLogs({maxAgeDays:0,maxTotalBytes:0,dryRun:false,protectPath:newest}).deleted.length,0);
  fs.rmSync(dir,{recursive:true});fs.symlinkSync(root,dir);assert.throws(()=>cleanupExecLogs(),/real directory/);
+});
+test('service retention keeps active logs and removes stale startup logs',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'service-retention-')),prev=process.env.SSH_AGENT_STATE_DIR;process.env.SSH_AGENT_STATE_DIR=root;
+ t.after(()=>{if(prev===undefined)delete process.env.SSH_AGENT_STATE_DIR;else process.env.SSH_AGENT_STATE_DIR=prev;fs.rmSync(root,{recursive:true,force:true});});
+ const dir=path.join(root,'services');fs.mkdirSync(dir);const old=path.join(dir,'0'.repeat(32)+'.log'),recent=path.join(dir,'1'.repeat(32)+'.log'),active=path.join(dir,'2'.repeat(32)+'.log');
+ for(const file of [old,recent,active])fs.writeFileSync(file,'x'.repeat(10));const oldTime=new Date(Date.now()-60*86400000);fs.utimesSync(old,oldTime,oldTime);
+ fs.writeFileSync(path.join(dir,'2'.repeat(32)+'.json'),JSON.stringify({pid:process.pid}));
+ const preview=cleanupServiceLogs({maxAgeDays:30,maxTotalBytes:30});assert.deepEqual(preview.candidates,[old]);assert.ok(preview.skipped.includes(active));assert.ok(fs.existsSync(old));
+ const deleted=cleanupServiceLogs({maxAgeDays:30,maxTotalBytes:30,dryRun:false});assert.deepEqual(deleted.deleted,[old]);assert.ok(fs.existsSync(active));assert.ok(fs.existsSync(recent));
 });
 test('lock keys are validated and commands are passed as shell literals',()=>{
  assert.throws(()=>withResourceLock('id','../escape'),/resourceKey/);const wrapped=withResourceLock("printf 'x'; exit 3",'deployment:api');assert.match(wrapped,/flock -n -E 75/);assert(!wrapped.includes('deployment:api'));assert.equal(withResourceLock('id'),'id');

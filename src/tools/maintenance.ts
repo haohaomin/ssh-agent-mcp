@@ -1,4 +1,5 @@
 import { cleanupExecLogs } from '../services/exec-log-retention.js';
+import { cleanupServiceLogs } from '../services/service-log-retention.js';
 import fs from "node:fs";
 import { spawnSync } from "node:child_process";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -73,15 +74,19 @@ export function registerMaintenanceTools(server: McpServer): void {
   });
 
   server.registerTool("ssh_session_log_cleanup", {
-    description: "Preview/remove logs: scope=sessions handles stopped durable sessions whose workers exited; scope=exec handles UUID exec-output logs. Automatic exec retention runs after log writes (7 days/512 MiB, protecting the newest output). Dry-run is enabled by default. maxTotalBytes caps retained eligible logs; active workers and unknown state are skipped.",
+    description: "Preview/remove logs: scope=sessions handles stopped durable sessions, scope=exec handles UUID exec-output logs, and scope=services handles stopped shared-service startup logs. Exec logs are automatically retained for 7 days/512 MiB; service logs are automatically retained for 30 days/64 MiB. Dry-run is enabled by default; active workers and the current service log are skipped.",
     inputSchema: {
-      scope: z.enum(['sessions','exec']).default('sessions').describe('sessions preserves existing cleanup; exec previews/deletes UUID exec-output logs'),
+      scope: z.enum(['sessions','exec','services']).default('sessions').describe('sessions preserves existing cleanup; exec handles command output; services handles shared-service startup logs'),
       maxAgeDays: z.number().min(0).max(36500).default(30),
       maxTotalBytes: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
       dryRun: z.boolean().default(true),
     },
   }, async ({ scope, maxAgeDays, maxTotalBytes, dryRun }) => {
-    try { if(scope==='exec')return result(cleanupExecLogs({maxAgeDays,maxTotalBytes,dryRun})); return result(await sessions.cleanup({ maxAgeDays, maxTotalBytes, dryRun })); }
+    try {
+      if(scope==='exec') return result(cleanupExecLogs({maxAgeDays,maxTotalBytes,dryRun}));
+      if(scope==='services') return result(cleanupServiceLogs({maxAgeDays,maxTotalBytes,dryRun}));
+      return result(await sessions.cleanup({ maxAgeDays, maxTotalBytes, dryRun }));
+    }
     catch (error) { return failure(error); }
   });
 }

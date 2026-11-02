@@ -312,7 +312,7 @@ node build/index.js --ui --import-ssh-config --http-port 3000
 {"maxAgeDays":30,"dryRun":true}
 ```
 
-将参数传给 `ssh_session_log_cleanup`。确认候选项后，再将 `dryRun` 设为 `false` 删除日志和元数据。`maxAgeDays: 0` 选择所有可清理记录；年龄按日志和元数据的最近修改时间计算。也可设置 `maxTotalBytes`，先扣除按年龄选中的日志，再从旧到新清理，直到剩余可清理日志满足空间上限。
+将参数传给 `ssh_session_log_cleanup`。确认候选项后，再将 `dryRun` 设为 `false` 删除日志和元数据。`maxAgeDays: 0` 选择所有可清理记录；年龄按日志和元数据的最近修改时间计算。也可设置 `maxTotalBytes`，先扣除按年龄选中的日志，再从旧到新清理，直到剩余可清理日志满足空间上限。`scope: "exec"` 清理完整命令输出，`scope: "services"` 清理已停止 shared service 的启动日志；两者默认分别保留 7 天/512 MiB 和 30 天/64 MiB。
 
 只清理 worker 已退出的会话，活动 worker、正在启动的同名会话和无法确认的状态都会跳过。自然退出但保留 worker 的终端需先调用 `ssh_session_stop`。空间上限只统计可清理日志，不保证整个状态目录低于此值。预览返回 `reclaimableBytes`；实际删除返回 `freedBytes`，不对活动日志进行截断或轮转。
 
@@ -411,6 +411,8 @@ MCP 进程重启后可以复用同一 worker、shell 和环境。`ensure` 不重
 ```
 
 调用 `ssh_session_log_cleanup` 查看候选路径，再用 `dryRun: false` 删除。只处理 exec-output 目录内 UUID 命名的普通日志，跳过符号链接及其他文件；不删除终端、任务、活动历史或续传文件。省略 scope 保持原来的 sessions 清理。自动清理在写入完整日志后触发，清理失败不会覆盖已经完成的命令结果；手动清理可查看错误。
+
+shared service 启动日志位于状态目录的 `services/` 下。每次启动新服务时会自动清理超过 30 天或超过 64 MiB 配额的已停止服务日志；当前服务和仍存活的服务进程会跳过。需要立即检查时传 `scope: "services", dryRun: true`，确认后再执行删除。
 
 ## 多机聚合执行
 
