@@ -342,6 +342,7 @@ export class SSHConnectionManager {
   // needs one decoder for its whole lifetime rather than a decode per chunk.
   private shellDecoders: Map<string, StringDecoder> = new Map();
   private defaultName: string = "default";
+  private defaultPinned = false;
   private configLoader?: () => SshConnectionConfigMap;
 
   readonly interactive = new InteractiveService(this);
@@ -386,7 +387,9 @@ export class SSHConnectionManager {
     this.configs = configs;
     if (defaultName && configs[defaultName]) {
       this.defaultName = defaultName;
+      this.defaultPinned = true;
     } else if (Object.keys(configs).length > 0) {
+      this.defaultPinned = false;
       this.defaultName = Object.keys(configs)[0];
     }
   }
@@ -411,8 +414,13 @@ export class SSHConnectionManager {
     const previous = this.configs;
     const names = new Set([...Object.keys(previous), ...Object.keys(configs)]);
     const added: string[] = [], changed: string[] = [], removed: string[] = [], preserved: string[] = [];
+    // Native hosts derive User/Port/HostName from the SSH config file at connect
+    // time, so they only stay "unchanged" while that file is unchanged too.
+    // The hash is captured when the configuration is imported.
     const same = (left: SSHConfig | undefined, right: SSHConfig | undefined) =>
-      left !== undefined && right !== undefined && left.backend !== 'openssh' && isDeepStrictEqual(left, right);
+      left !== undefined && right !== undefined && isDeepStrictEqual(left, right) &&
+      (left.backend !== 'openssh' ||
+        (typeof left.nativeConfigHash === 'string' && left.nativeConfigHash === right.nativeConfigHash));
 
     for (const name of names) {
       if (!previous[name]) added.push(name);
@@ -432,8 +440,13 @@ export class SSHConnectionManager {
     this.commandBlacklistRegexes = blacklists;
     installRedactionValues(redactions, true);
     this.configs = configs;
-    if (defaultName && configs[defaultName]) this.defaultName = defaultName;
-    else if (!configs[this.defaultName] && Object.keys(configs).length > 0) this.defaultName = Object.keys(configs)[0];
+    if (defaultName && configs[defaultName]) {
+      this.defaultName = defaultName;
+      this.defaultPinned = true;
+    } else if (!configs[this.defaultName] && Object.keys(configs).length > 0) {
+      this.defaultName = Object.keys(configs)[0];
+      this.defaultPinned = false;
+    }
     return { added, changed, removed, preserved };
   }
 
@@ -573,6 +586,10 @@ export class SSHConnectionManager {
 
           this.clients.set(key, client);
           this.connected.set(key, true);
+          // Once an explicitly named connection succeeds, make it the default
+          // for subsequent optional calls. An explicit configured default is
+          // pinned and is never displaced by a health check or reconnect.
+          if (!this.defaultPinned) this.defaultName = key;
           this.scheduleStatusCollection(key);
           resolveOnce();
         } catch (error) {

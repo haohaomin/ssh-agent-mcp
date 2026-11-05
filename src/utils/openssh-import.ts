@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import os from 'node:os';
 import type { SSHConfig, SshConnectionConfigMap } from '../models/types.js';
@@ -73,6 +74,34 @@ export function importOpenSsh(file = path.join(os.homedir(), '.ssh', 'config'), 
   const configs: SshConnectionConfigMap = Object.create(null);
   const skipped: Record<string, string> = Object.create(null);
   const supported = new Set(['hostname','user','port','identityfile','identityagent','identitiesonly','proxyjump','serveraliveinterval','serveralivecountmax','userknownhostsfile','hostkeyalias']);
+  // Effective configuration for a host that must fall back to native OpenSSH.
+  // ssh resolves everything from the file, so the reported identity and the
+  // reload fingerprint both come from the directives that actually apply.
+  function nativeSnapshot(alias: string): { port: number; username: string; digest: string } {
+    const applied: string[] = []; let username: string | undefined; let port = 22; let portSet = false;
+    let conditional = false; let active = true;
+    const walk = (items: Directive[]) => {
+      for (const d of items) {
+        if (d.key === 'include') { if (active) walk(d.children || []); continue; }
+        // Match values are conditional and may depend on commands we never run.
+        if (d.key === 'match') { conditional = true; active = false; continue; }
+        if (d.key === 'host') { active = matches(alias, d.values); continue; }
+        if (!active) continue;
+        applied.push(`${d.key}=${d.values.join(' ')}`);
+        if (d.key === 'user' && username === undefined) username = d.values[0];
+        if (d.key === 'port' && !portSet) {
+          const parsed = Number(d.values[0]);
+          if (Number.isInteger(parsed) && parsed >= 1 && parsed <= 65535) { port = parsed; portSet = true; }
+        }
+      }
+    };
+    walk(directives);
+    return {
+      port,
+      username: (conditional ? undefined : username) || os.userInfo().username,
+      digest: createHash('sha256').update(applied.join('\n')).digest('hex'),
+    };
+  }
   function resolve(alias: string, chain: string[] = []): SSHConfig {
     if (chain.includes(alias) || chain.length >= 8) throw new Error(`ProxyJump cycle/depth limit: ${[...chain, alias].join(' -> ')}`);
     const values = new Map<string, string[]>(); let active = true;
@@ -136,7 +165,10 @@ export function importOpenSsh(file = path.join(os.homedir(), '.ssh', 'config'), 
     try { configs[alias] = resolve(alias); } catch (error) {
       const reason = (error as Error).message;
       if (nativeFallback && /Unsupported|not supported|multiple/.test(reason)) {
-        configs[alias] = {name:alias,host:alias,port:22,username:os.userInfo().username,backend:'openssh',nativeTarget:alias,nativeConfigFile:usesSystemConfig?undefined:path.resolve(expandHome(file))};
+        // Native OpenSSH still resolves User/Port/HostName from the config file,
+        // so the reported identity must come from the file rather than this host.
+        const snapshot = nativeSnapshot(alias);
+        configs[alias] = {name:alias,host:alias,port:snapshot.port,username:snapshot.username,backend:'openssh',nativeTarget:alias,nativeConfigFile:usesSystemConfig?undefined:path.resolve(expandHome(file)),nativeConfigHash:snapshot.digest};
         warnings.add(`${alias}: using native OpenSSH compatibility for ${reason}. Config commands run only when connecting.`);
       } else skipped[alias] = reason;
     }

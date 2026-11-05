@@ -67,6 +67,11 @@ export class OpenSshClient extends EventEmitter {
   private children=new Set<ChildProcessWithoutNullStreams>();
   private terminals=new Set<IPty>();
   private forwards=new Map<number,{server:net.Server;channels:Set<Duplex>}>();
+  // OpenSSH's mux server commonly defaults MaxSessions to 10. Keep a little
+  // headroom for SFTP/forwarding channels and queue exec requests locally so a
+  // fan-out cannot turn normal work into "Session open refused by peer".
+  private execActive=0;
+  private execQueue:Array<()=>void>=[];
   private ended=false;
   constructor(private config:SSHConfig){super();fs.chmodSync(this.dir,0o700);}
   private get target(){return this.config.nativeTarget||this.config.host;}
@@ -82,6 +87,16 @@ export class OpenSshClient extends EventEmitter {
   }
   private run(args:string[]){
     const child=spawn(process.env.SSH_MCP_SSH_BIN||'ssh',args,{stdio:'pipe',env:this.environment()});this.children.add(child);child.once('close',()=>this.children.delete(child));return child;}
+  private acquireExecSlot(run:()=>void){
+    if(this.ended){run();return;}
+    const limit=Math.max(1,Math.min(32,Math.floor(this.config.maxConcurrentChannels ?? 8)));
+    if(this.execActive<limit){this.execActive++;run();return;}
+    this.execQueue.push(()=>{if(this.ended){run();return;}this.execActive++;run();});
+  }
+  private releaseExecSlot(){
+    if(this.execActive>0)this.execActive--;
+    const next=this.execQueue.shift();if(next)next();
+  }
   connect(){
     this.master=this.run(this.args(['-M','-N','-o','ControlMaster=yes','-o','ControlPersist=no']));
     let stderr='';this.master.stderr.on('data',b=>{stderr=(stderr+b.toString()).slice(-8192);});
@@ -97,8 +112,14 @@ export class OpenSshClient extends EventEmitter {
     return this;
   }
   exec(command:string, options:any, callback:any){
-    const child=this.run([...this.args([options?.pty?'-tt':'-T','-o','RemoteCommand=none']),command]);
-    const channel=new ProcessChannel(child, true);callback(undefined,channel);
+    this.acquireExecSlot(()=>{
+      if(this.ended){this.releaseExecSlot();callback(new Error('OpenSSH client is closed'));return;}
+      let released=false;const release=()=>{if(released)return;released=true;this.releaseExecSlot();};
+      try{
+        const child=this.run([...this.args([options?.pty?'-tt':'-T','-o','RemoteCommand=none']),command]);
+        const channel=new ProcessChannel(child, true);channel.once('close',release);channel.once('error',release);callback(undefined,channel);
+      }catch(error){release();callback(error);}
+    });
   }
   shell(options:any,callback:any){
     try{
@@ -143,6 +164,6 @@ export class OpenSshClient extends EventEmitter {
     const localPort=(entry.server.address() as net.AddressInfo)?.port;
     execFile(process.env.SSH_MCP_SSH_BIN||'ssh',this.args(['-O','cancel','-R',`${bindHost}:${port}:127.0.0.1:${localPort}`]),{timeout:10000},error=>{entry.server.close();for(const c of entry.channels)c.destroy();this.forwards.delete(port);callback(error);});
   }
-  end(){if(this.ended)return;this.ended=true;for(const e of this.forwards.values()){e.server.close();for(const c of e.channels)c.destroy();}for(const child of this.children)child.kill();for(const terminal of this.terminals){try{terminal.kill();}catch{}}fs.rmSync(this.dir,{recursive:true,force:true});}
+  end(){if(this.ended)return;this.ended=true;const queued=this.execQueue.splice(0);for(const run of queued)run();for(const e of this.forwards.values()){e.server.close();for(const c of e.channels)c.destroy();}for(const child of this.children)child.kill();for(const terminal of this.terminals){try{terminal.kill();}catch{}}fs.rmSync(this.dir,{recursive:true,force:true});}
   destroy(){this.end();}
 }

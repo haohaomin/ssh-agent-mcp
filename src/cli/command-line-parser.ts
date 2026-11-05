@@ -140,6 +140,15 @@ export class CommandLineParser {
     return number;
   }
 
+  private static parseChannelLimit(value: unknown): number | undefined {
+    if (value === undefined || value === null || value === "") return undefined;
+    const number = Number(value);
+    if (!Number.isSafeInteger(number) || number < 1 || number > 32) {
+      throw new Error(`maxConcurrentChannels must be an integer between 1 and 32`);
+    }
+    return number;
+  }
+
   private static parseMaxOutputBytes(value: unknown): number | undefined {
     if (value === undefined || value === null || value === "") {
       return undefined;
@@ -616,7 +625,9 @@ export class CommandLineParser {
       backend: config.backend,
       nativeTarget: config.nativeTarget,
       nativeConfigFile: config.nativeConfigFile,
+      nativeConfigHash: config.nativeConfigHash,
       nativeOptions: config.nativeOptions,
+      maxConcurrentChannels: this.parseChannelLimit(config.maxConcurrentChannels),
       jumpHosts: config.jumpHosts?.map((hop: unknown) => this.normalizeConfig(hop)),
       knownHostsFile: config.knownHostsFile ? this.normalizeLocalPath(config.knownHostsFile) : undefined,
       hostKeyAlias: config.hostKeyAlias,

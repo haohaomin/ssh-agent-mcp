@@ -11,7 +11,9 @@ export interface SSHConfig {
   backend?: 'ssh2' | 'openssh';
   nativeTarget?: string;
   nativeConfigFile?: string;
+  nativeConfigHash?: string;
   nativeOptions?: string[];
+  maxConcurrentChannels?: number; // Native OpenSSH exec channel limit, default 8
   jumpHosts?: SSHConfig[];
   knownHostsFile?: string;
   hostKeyAlias?: string;
