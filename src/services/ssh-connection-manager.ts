@@ -345,6 +345,27 @@ export class SSHConnectionManager {
   private defaultPinned = false;
   private configLoader?: () => SshConnectionConfigMap;
 
+  private preferredDefault(configs: SshConnectionConfigMap): string | undefined {
+    try {
+      const file = path.join(stateDirectory(), 'last-connection.json');
+      const saved = JSON.parse(fs.readFileSync(file, 'utf8')) as { name?: string; host?: string; port?: number };
+      const config = saved.name ? configs[saved.name] : undefined;
+      if (config && config.host === saved.host && config.port === saved.port) return saved.name;
+    } catch { /* A missing or malformed preference is equivalent to no preference. */ }
+    return Object.keys(configs)[0];
+  }
+
+  private rememberDefault(name: string, config: SSHConfig): void {
+    try {
+      const file = path.join(stateDirectory(), 'last-connection.json');
+      const temporary = `${file}.${process.pid}.tmp`;
+      fs.writeFileSync(temporary, JSON.stringify({ name, host: config.host, port: config.port }) + '\n', { mode: 0o600 });
+      fs.renameSync(temporary, file);
+    } catch (error) {
+      Logger.log(`Unable to save last SSH connection preference: ${(error as Error).message}`, 'debug');
+    }
+  }
+
   readonly interactive = new InteractiveService(this);
   private constructor() {}
 
@@ -390,7 +411,7 @@ export class SSHConnectionManager {
       this.defaultPinned = true;
     } else if (Object.keys(configs).length > 0) {
       this.defaultPinned = false;
-      this.defaultName = Object.keys(configs)[0];
+      this.defaultName = this.preferredDefault(configs)!;
     }
   }
 
@@ -444,7 +465,7 @@ export class SSHConnectionManager {
       this.defaultName = defaultName;
       this.defaultPinned = true;
     } else if (!configs[this.defaultName] && Object.keys(configs).length > 0) {
-      this.defaultName = Object.keys(configs)[0];
+      this.defaultName = this.preferredDefault(configs)!;
       this.defaultPinned = false;
     }
     return { added, changed, removed, preserved };
@@ -586,6 +607,7 @@ export class SSHConnectionManager {
 
           this.clients.set(key, client);
           this.connected.set(key, true);
+          this.rememberDefault(key, config);
           // Once an explicitly named connection succeeds, make it the default
           // for subsequent optional calls. An explicit configured default is
           // pinned and is never displaced by a health check or reconnect.
