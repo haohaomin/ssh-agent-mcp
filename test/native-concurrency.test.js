@@ -9,6 +9,14 @@ import { SSHConnectionManager } from '../build/services/ssh-connection-manager.j
 
 test('native OpenSSH queues exec channels below the mux session limit', { timeout: 30000 }, async t => {
   const fixture = await localSshd(t);
+  const state = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-concurrency-state-'));
+  const previousState = process.env.SSH_AGENT_STATE_DIR;
+  process.env.SSH_AGENT_STATE_DIR = state;
+  t.after(() => {
+    if (previousState === undefined) delete process.env.SSH_AGENT_STATE_DIR;
+    else process.env.SSH_AGENT_STATE_DIR = previousState;
+    fs.rmSync(state, { recursive: true, force: true });
+  });
   const imported = importOpenSsh(fixture.clientConfig);
   const manager = SSHConnectionManager.getInstance();
   const config = { ...imported.configs.fixture, pty: false, maxConcurrentChannels: 4 };
